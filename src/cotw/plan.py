@@ -30,6 +30,7 @@ class ClipPlan:
     stat: str  # gold text on the lower third, e.g. "1V3 CLUTCH"
     context: str  # e.g. "Mirage · Round 12"
     punch: Punch | None
+    team: str = ""  # from names.json; empty means use the CLI default
 
 
 @dataclass(frozen=True)
@@ -38,25 +39,44 @@ class Timeline:
     duration: float
 
 
-def load_names(path: Path) -> dict[str, str]:
-    """Display-name overrides: {"in-game name or steamid": "Name to show"}."""
+@dataclass(frozen=True)
+class PlayerInfo:
+    """Per-player overrides from names.json; either field may be None (keep the default)."""
+
+    name: str | None = None
+    team: str | None = None
+
+
+def load_names(path: Path) -> dict[str, PlayerInfo]:
+    """Read names.json: {"<steamid64 or in-game name>": "Display" | {"name": ..., "team": ...}}."""
     try:
-        names = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise PlanError(f"cannot read names file {path}: {exc}") from exc
-    if not isinstance(names, dict) or not all(isinstance(v, str) for v in names.values()):
-        raise PlanError(f'{path} must be a JSON object of {{"in-game name": "display name"}}')
-    return names
+    if not isinstance(raw, dict):
+        raise PlanError(f"{path} must be a JSON object keyed by SteamID64 or in-game name")
+    players: dict[str, PlayerInfo] = {}
+    for key, value in raw.items():
+        if isinstance(value, str):  # shorthand: just a display name
+            players[key] = PlayerInfo(name=value)
+        elif isinstance(value, dict) and all(isinstance(v, str) for v in value.values()):
+            unknown = set(value) - {"name", "team"}
+            if unknown:
+                raise PlanError(f"{path}: {key!r} has unknown field(s) {sorted(unknown)} (use name, team)")
+            players[key] = PlayerInfo(name=value.get("name"), team=value.get("team"))
+        else:
+            raise PlanError(f'{path}: {key!r} must be a display name or {{"name": ..., "team": ...}}')
+    return players
 
 
-def _display_name(player: str, steamid: str, names: dict[str, str]) -> str:
-    """Match by steamid, then exact in-game name, then case-insensitively."""
+def _lookup(player: str, steamid: str, names: dict[str, PlayerInfo]) -> PlayerInfo:
+    """Match by SteamID64, then exact in-game name, then case-insensitively."""
     if steamid in names:
         return names[steamid]
     if player in names:
         return names[player]
     lowered = {k.lower(): v for k, v in names.items()}
-    return lowered.get(player.lower(), player)
+    return lowered.get(player.lower(), PlayerInfo())
 
 
 def load_report(path: Path) -> dict:
@@ -109,7 +129,7 @@ def build_timeline(
     *,
     video_duration: float | None = None,
     clip_durations: dict[int, float] | None = None,
-    names: dict[str, str] | None = None,
+    names: dict[str, PlayerInfo] | None = None,
 ) -> Timeline:
     """Lay the report's sequences end to end.
 
@@ -136,8 +156,8 @@ def build_timeline(
             punch = Punch(punch.label, punch.value, context)
         cam = (seq.get("cameras") or [{}])[0]
         player = best.get("player") or cam.get("name", "")
-        player = _display_name(player, str(best.get("steamid") or cam.get("steamid") or ""), names or {})
-        clips.append(ClipPlan(seq["number"], t, dur, player, stat, context, punch))
+        info = _lookup(player, str(best.get("steamid") or cam.get("steamid") or ""), names or {})
+        clips.append(ClipPlan(seq["number"], t, dur, info.name or player, stat, context, punch, info.team or ""))
         t += dur
     return Timeline(clips, t)
 

@@ -1,6 +1,6 @@
 import pytest
 
-from cotw.plan import PlanError, build_timeline, describe_moment, load_report, merge_timelines, load_names
+from cotw.plan import PlanError, build_timeline, describe_moment, load_report, merge_timelines, load_names, PlayerInfo
 
 
 def _report():
@@ -83,19 +83,39 @@ def test_merge_timelines_offsets_and_renumbers():
     assert merged.duration == 60.0
 
 
-def test_display_names_match_name_then_steamid_then_case_insensitively():
+def test_names_match_steamid_then_name_then_case_insensitively():
     report = _report()
     report["sequences"][0]["moments"][0]["steamid"] = "76561"  # saltboi (sequence 2)
-    assert build_timeline(report, names={"fuzzyhat": "Fuzzy"}).clips[0].player == "Fuzzy"
-    assert build_timeline(report, names={"fuzzyhat": "Fuzzy"}).clips[1].player == "saltboi"
-    assert build_timeline(report, names={"76561": "Salt", "fuzzyhat": "Fuzzy"}).clips[0].player == "Fuzzy"
-    assert build_timeline(report, names={"76561": "Salt"}).clips[1].player == "Salt"
+    fuzzy = {"fuzzyhat": PlayerInfo(name="Fuzzy")}
+    assert build_timeline(report, names=fuzzy).clips[0].player == "Fuzzy"
+    assert build_timeline(report, names=fuzzy).clips[1].player == "saltboi"
+    both = {"76561": PlayerInfo(name="Salt"), "fuzzyhat": PlayerInfo(name="Fuzzy")}
+    assert [c.player for c in build_timeline(report, names=both).clips] == ["Fuzzy", "Salt"]
 
 
-def test_load_names_validates_shape(tmp_path):
+def test_team_override_is_per_player_and_independent_of_name():
+    report = _report()
+    report["sequences"][0]["moments"][0]["steamid"] = "76561"
+    names = {"76561": PlayerInfo(team="Saltcrew"), "fuzzyhat": PlayerInfo(name="Fuzzy", team="Free Agents")}
+    first, second = build_timeline(report, names=names).clips
+    assert (first.player, first.team) == ("Fuzzy", "Free Agents")
+    assert (second.player, second.team) == ("saltboi", "Saltcrew")  # name untouched
+    assert build_timeline(report).clips[0].team == ""
+
+
+def test_load_names_accepts_both_formats(tmp_path):
     p = tmp_path / "n.json"
-    p.write_text('{"-kiwi": "Kiwi"}')
-    assert load_names(p) == {"-kiwi": "Kiwi"}
-    p.write_text('["-kiwi"]')
+    p.write_text('{"-kiwi": "Kiwi", "7656": {"name": "Fuzzy", "team": "Saltcrew"}, "x": {"team": "T"}}')
+    assert load_names(p) == {
+        "-kiwi": PlayerInfo(name="Kiwi"),
+        "7656": PlayerInfo("Fuzzy", "Saltcrew"),
+        "x": PlayerInfo(team="T"),
+    }
+
+
+@pytest.mark.parametrize("bad", ['["-kiwi"]', '{"a": 5}', '{"a": {"nmae": "x"}}', '{"a": {"name": 1}}'])
+def test_load_names_rejects_bad_shapes(tmp_path, bad):
+    p = tmp_path / "n.json"
+    p.write_text(bad)
     with pytest.raises(PlanError):
         load_names(p)

@@ -49,7 +49,7 @@ def render_assets(
 
     for clip in timeline.clips:
         if lower_thirds:
-            img = graphics.lower_third(clip.player, team, clip.stat, clip.context)
+            img = graphics.lower_third(clip.player, clip.team or team, clip.stat, clip.context)
             assets.lower_thirds[clip.number] = save(img, f"lower_third_{clip.number:02d}.png")
         if punches and clip.punch:
             frames = work / f"punch_{clip.number:02d}"
@@ -83,9 +83,9 @@ def _save(img, path: Path) -> Path:
 @click.option("--league", default="", help="Title card league tag, e.g. ESEA.")
 @click.option("--channel", default="FuzzyHatTV", show_default=True, help="Channel name on the end card.")
 @click.option("--next-up", default="", help='End card "Next up" label, e.g. EP.08.')
-@click.option("--team", default="", help="Team shown on every lower third (not in the JSON).")
+@click.option("--team", default="", help="Default team for players without one in names.json.")
 @click.option("--names", "names_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
-              help="JSON of display-name overrides (default: ./names.json if present).")
+              help="JSON of per-player name/team overrides (default: ./names.json if present).")
 @click.option("--title-style", type=click.Choice(["center", "cinematic"]), default="center", show_default=True)
 @click.option("--title-seconds", type=float, default=5.0, show_default=True)
 @click.option("--lower-third-seconds", type=float, default=Options.lower_third_seconds, show_default=True,
@@ -133,7 +133,7 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
         names_path = names_path or (Path("names.json") if Path("names.json").is_file() else None)
         names = load_names(names_path) if names_path else {}
         if names_path:
-            click.echo(f"Display names: {names_path} ({len(names)} entries)")
+            click.echo(f"Player overrides: {names_path} ({len(names)} entries)")
         mains, timelines = [], []
         for v in videos:
             info = probe(ffmpeg, v)
