@@ -64,7 +64,9 @@ def describe_moment(moment: dict) -> tuple[str, Punch | None]:
 
     parts: list[str] = []
     if kills:
-        parts.append(_kills_label(kills))
+        weapon = re.search(r"\(([^)]+)\)", moment.get("description") or "")
+        label = _kills_label(kills)
+        parts.append(f"{label} ({weapon.group(1).replace('_', ' ').upper()})" if weapon else label)
     won_clutch = bool(clutch and clutch.get("won"))
     if won_clutch:
         parts.append(f"1V{clutch['opponents']} CLUTCH")

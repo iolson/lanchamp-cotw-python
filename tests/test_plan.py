@@ -39,14 +39,14 @@ def test_probed_clip_durations_win_over_rescale():
 def test_featured_moment_is_highest_scoring():
     first = build_timeline(_report()).clips[0]
     assert first.player == "fuzzyhat"
-    assert first.stat == "3K"
+    assert first.stat == "3K (AK47)"
     assert first.context == "Mirage · Round 3"
     assert first.punch is None
 
 
 def test_clutch_gets_punch_with_context():
     second = build_timeline(_report()).clips[1]
-    assert second.stat == "4K + 1V3 CLUTCH"
+    assert second.stat == "4K (M4A1) + 1V3 CLUTCH"
     assert (second.punch.label, second.punch.value) == ("CLUTCH", "1v3")
     assert second.punch.context == "Mirage · Round 12"
 
@@ -54,7 +54,7 @@ def test_clutch_gets_punch_with_context():
 @pytest.mark.parametrize(
     "moment,stat,punch_value",
     [
-        ({"kills": 5, "description": "ACE (awp)"}, "ACE", "ACE"),
+        ({"kills": 5, "description": "ACE (awp)"}, "ACE (AWP)", "ACE"),
         ({"kills": 4, "description": "4K"}, "4K", "4K"),
         ({"kills": 2, "description": "2K, knife"}, "2K + KNIFE", None),
         ({"kills": 0, "clutch": None, "description": "moment"}, "HIGHLIGHT", None),
