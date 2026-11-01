@@ -1,6 +1,6 @@
 import pytest
 
-from cotw.plan import PlanError, build_timeline, describe_moment, load_report
+from cotw.plan import PlanError, build_timeline, describe_moment, load_report, merge_timelines
 
 
 def _report():
@@ -73,3 +73,11 @@ def test_load_report_rejects_empty(tmp_path):
         load_report(p)
     with pytest.raises(PlanError):
         load_report(tmp_path / "missing.json")
+
+
+def test_merge_timelines_offsets_and_renumbers():
+    a = build_timeline(_report())  # clips 1, 2 over 30s
+    merged = merge_timelines([a, a])
+    assert [c.number for c in merged.clips] == [1, 2, 3, 4]
+    assert [c.start for c in merged.clips] == [0.0, 10.0, 30.0, 40.0]
+    assert merged.duration == 60.0

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
@@ -118,3 +118,14 @@ def build_timeline(
         clips.append(ClipPlan(seq["number"], t, dur, player, stat, context, punch))
         t += dur
     return Timeline(clips, t)
+
+
+def merge_timelines(timelines: list[Timeline]) -> Timeline:
+    """Chain timelines end to end, renumbering clips 1..N so numbers stay unique across videos."""
+    clips: list[ClipPlan] = []
+    offset = 0.0
+    for tl in timelines:
+        for clip in tl.clips:
+            clips.append(replace(clip, number=len(clips) + 1, start=clip.start + offset))
+        offset += tl.duration
+    return Timeline(clips, offset)

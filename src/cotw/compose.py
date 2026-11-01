@@ -122,19 +122,19 @@ class _Graph:
 
 
 def build_args(
-    main: Path,
-    info: MediaInfo,
+    mains: list[tuple[Path, MediaInfo]],
     timeline: Timeline,
     assets: Assets,
     opts: Options,
     output: Path,
 ) -> list[str]:
     g = _Graph()
+    info = mains[0][1]  # the first video sets the output size and frame rate
     fps = f"{info.fps.numerator}/{info.fps.denominator}"
     size = f"{info.width}:{info.height}"
     needs_scale = (info.width, info.height) != (W, H)
     rgba = f"format=rgba,scale={size}" if needs_scale else "format=rgba"
-    main_dur = info.duration
+    main_dur = sum(i.duration for _, i in mains)
 
     def loop_png(path: Path, seconds: float) -> int:
         return g.add_input("-loop", "1", "-framerate", fps, "-t", _num(seconds), "-i", str(path))
@@ -142,8 +142,17 @@ def build_args(
     def silence(seconds: float) -> int:
         return g.add_input("-f", "lavfi", "-t", _num(seconds), "-i", "anullsrc=r=48000:cl=stereo")
 
-    m = g.add_input("-i", str(main))
-    g.chain(f"[{m}:v]fps={fps},scale={size},setsar=1[v0]")
+    # Every highlight video is normalised, then joined into one main stream.
+    for k, (path, mi) in enumerate(mains):
+        idx = g.add_input("-i", str(path))
+        g.chain(f"[{idx}:v]fps={fps},scale={size},setsar=1[mv{k}]")
+        if mi.has_audio:
+            g.chain(f"[{idx}:a:0]aresample=48000,aformat=channel_layouts=stereo[ma{k}]")
+        else:
+            sil = silence(mi.duration)
+            g.chain(f"[{sil}:a]anull[ma{k}]")
+    joined_main = "".join(f"[mv{k}][ma{k}]" for k in range(len(mains)))
+    g.chain(f"{joined_main}concat=n={len(mains)}:v=1:a=1[v0][amain]")
     cur, step = "v0", 0
 
     def overlay(top: str, enable: tuple[float, float] | None, x: str = "0") -> None:
@@ -188,12 +197,6 @@ def build_args(
         overlay("endov", (s, main_dur))
 
     g.chain(f"[{cur}]format=yuv420p[vmain]")
-
-    if info.has_audio:
-        g.chain(f"[{m}:a:0]aresample=48000,aformat=channel_layouts=stereo[amain]")
-    else:
-        a = silence(main_dur)
-        g.chain(f"[{a}:a]anull[amain]")
 
     # Title + main + (appended) end card, joined with the concat filter.
     segments: list[tuple[str, str]] = []
