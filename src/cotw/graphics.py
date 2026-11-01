@@ -76,7 +76,7 @@ def _corner_ticks(c: Canvas, m: float, length: float = 46, col=None, lw: float =
 
 
 def corner_bug(meta: EpisodeMeta) -> Image.Image:
-    """Persistent top-right watermark (transparent)."""
+    """Persistent top-left watermark (transparent); top-right is taken by the in-game killfeed."""
     c = Canvas()
     ep = meta.ep_tag
     mark_s, pad, gap = 54, 18, 14
@@ -84,7 +84,7 @@ def corner_bug(meta: EpisodeMeta) -> Image.Image:
     b_w = c.measure(ep, "mono", 500, 17, 3)
     box_w = pad + mark_s + gap + max(a_w, b_w) + pad
     box_h = 92
-    bx, by = W - 72 - box_w, 64
+    bx, by = 72, 64  # the web tool puts this top-right; moved left to clear the killfeed
     c.rect(bx, by, box_w, box_h, color("#080C12", 0.78), radius=14)
     c.outline(bx, by, box_w, box_h, color("#FFFFFF", 0.18), 1.5, radius=14)
     _mark(c, bx + pad, by + (box_h - mark_s) / 2, mark_s)

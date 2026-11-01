@@ -38,6 +38,27 @@ class Timeline:
     duration: float
 
 
+def load_names(path: Path) -> dict[str, str]:
+    """Display-name overrides: {"in-game name or steamid": "Name to show"}."""
+    try:
+        names = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PlanError(f"cannot read names file {path}: {exc}") from exc
+    if not isinstance(names, dict) or not all(isinstance(v, str) for v in names.values()):
+        raise PlanError(f'{path} must be a JSON object of {{"in-game name": "display name"}}')
+    return names
+
+
+def _display_name(player: str, steamid: str, names: dict[str, str]) -> str:
+    """Match by steamid, then exact in-game name, then case-insensitively."""
+    if steamid in names:
+        return names[steamid]
+    if player in names:
+        return names[player]
+    lowered = {k.lower(): v for k, v in names.items()}
+    return lowered.get(player.lower(), player)
+
+
 def load_report(path: Path) -> dict:
     try:
         report = json.loads(path.read_text(encoding="utf-8"))
@@ -64,9 +85,7 @@ def describe_moment(moment: dict) -> tuple[str, Punch | None]:
 
     parts: list[str] = []
     if kills:
-        weapon = re.search(r"\(([^)]+)\)", moment.get("description") or "")
-        label = _kills_label(kills)
-        parts.append(f"{label} ({weapon.group(1).replace('_', ' ').upper()})" if weapon else label)
+        parts.append(_kills_label(kills))
     won_clutch = bool(clutch and clutch.get("won"))
     if won_clutch:
         parts.append(f"1V{clutch['opponents']} CLUTCH")
@@ -90,6 +109,7 @@ def build_timeline(
     *,
     video_duration: float | None = None,
     clip_durations: dict[int, float] | None = None,
+    names: dict[str, str] | None = None,
 ) -> Timeline:
     """Lay the report's sequences end to end.
 
@@ -114,7 +134,9 @@ def build_timeline(
         context = " · ".join(p for p in (map_name, f"Round {seq['round']}" if "round" in seq else "") if p)
         if punch and not punch.context:
             punch = Punch(punch.label, punch.value, context)
-        player = best.get("player") or (seq.get("cameras") or [{}])[0].get("name", "")
+        cam = (seq.get("cameras") or [{}])[0]
+        player = best.get("player") or cam.get("name", "")
+        player = _display_name(player, str(best.get("steamid") or cam.get("steamid") or ""), names or {})
         clips.append(ClipPlan(seq["number"], t, dur, player, stat, context, punch))
         t += dur
     return Timeline(clips, t)

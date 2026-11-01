@@ -35,14 +35,32 @@ Reads `match-highlights.json` next to the video and writes `match-highlights-cot
 
 | Option | Purpose |
 | --- | --- |
+| `--names PATH` | Display-name overrides (default `./names.json`) |
 | `--report PATH` | JSON elsewhere than `<video>.json` |
 | `--clips-dir DIR` | `clip_NN.mp4` files from the highlights work dir; exact clip lengths replace the JSON's 0.1 s-rounded ones |
 | `--end-card append\|overlay\|off` | `append` (default) adds the 15 s card after the video; `overlay` covers the video's last 15 s |
+| `--lower-third-seconds N` | How long each lower third stays up (default 7) |
 | `--title-style center\|cinematic` | Title card style |
 | `--no-title / --no-bug / --no-lower-thirds / --no-punch` | Drop individual graphics |
 | `--encoder h264_nvenc` | GPU encode (default `libx264`, CRF `--quality 18`) |
 | `--graphics-only DIR` | Render the PNGs/frames to `DIR` and stop, to eyeball the look |
 | `--dry-run` | Print the timeline and the FFmpeg command only |
+
+## Display names
+
+Lower thirds show the in-game name from the JSON exactly as recorded (e.g. `-kiwi`). To show
+something else, create a **`names.json`** in the folder you run `cotw` from. It is git-ignored,
+so each person keeps their own:
+
+```json
+{
+  "-kiwi": "Kiwi",
+  "76561197971721260": "FuzzyHat"
+}
+```
+
+Keys are an in-game name (case-insensitive) or a Steam ID; values are what appears on screen.
+`cotw` picks up `./names.json` automatically, or point at another file with `--names PATH`.
 
 ## How timing works
 
@@ -50,7 +68,7 @@ The highlights JSON lists each clip's `duration_seconds`; clips are laid end to 
 each one's start in the video. Because those are rounded, the timeline is rescaled to the
 video's probed length (or use `--clips-dir` for exact values). Per clip:
 
-- lower third slides in 1.0 s after the clip starts, holds ~4.5 s, fades out
+- lower third slides in 1.0 s after the clip starts, holds ~7 s in total (`--lower-third-seconds`), fades out
 - stat punch plays 0.3 s in (over the clip's lead-in, before the first kill)
 
 The featured player/stat per clip is the highest-scoring moment in that sequence. The JSON has

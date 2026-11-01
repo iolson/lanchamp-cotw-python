@@ -1,6 +1,6 @@
 import pytest
 
-from cotw.plan import PlanError, build_timeline, describe_moment, load_report, merge_timelines
+from cotw.plan import PlanError, build_timeline, describe_moment, load_report, merge_timelines, load_names
 
 
 def _report():
@@ -39,14 +39,14 @@ def test_probed_clip_durations_win_over_rescale():
 def test_featured_moment_is_highest_scoring():
     first = build_timeline(_report()).clips[0]
     assert first.player == "fuzzyhat"
-    assert first.stat == "3K (AK47)"
+    assert first.stat == "3K"
     assert first.context == "Mirage · Round 3"
     assert first.punch is None
 
 
 def test_clutch_gets_punch_with_context():
     second = build_timeline(_report()).clips[1]
-    assert second.stat == "4K (M4A1) + 1V3 CLUTCH"
+    assert second.stat == "4K + 1V3 CLUTCH"
     assert (second.punch.label, second.punch.value) == ("CLUTCH", "1v3")
     assert second.punch.context == "Mirage · Round 12"
 
@@ -54,7 +54,7 @@ def test_clutch_gets_punch_with_context():
 @pytest.mark.parametrize(
     "moment,stat,punch_value",
     [
-        ({"kills": 5, "description": "ACE (awp)"}, "ACE (AWP)", "ACE"),
+        ({"kills": 5, "description": "ACE (awp)"}, "ACE", "ACE"),
         ({"kills": 4, "description": "4K"}, "4K", "4K"),
         ({"kills": 2, "description": "2K, knife"}, "2K + KNIFE", None),
         ({"kills": 0, "clutch": None, "description": "moment"}, "HIGHLIGHT", None),
@@ -81,3 +81,21 @@ def test_merge_timelines_offsets_and_renumbers():
     assert [c.number for c in merged.clips] == [1, 2, 3, 4]
     assert [c.start for c in merged.clips] == [0.0, 10.0, 30.0, 40.0]
     assert merged.duration == 60.0
+
+
+def test_display_names_match_name_then_steamid_then_case_insensitively():
+    report = _report()
+    report["sequences"][0]["moments"][0]["steamid"] = "76561"  # saltboi (sequence 2)
+    assert build_timeline(report, names={"fuzzyhat": "Fuzzy"}).clips[0].player == "Fuzzy"
+    assert build_timeline(report, names={"fuzzyhat": "Fuzzy"}).clips[1].player == "saltboi"
+    assert build_timeline(report, names={"76561": "Salt", "fuzzyhat": "Fuzzy"}).clips[0].player == "Fuzzy"
+    assert build_timeline(report, names={"76561": "Salt"}).clips[1].player == "Salt"
+
+
+def test_load_names_validates_shape(tmp_path):
+    p = tmp_path / "n.json"
+    p.write_text('{"-kiwi": "Kiwi"}')
+    assert load_names(p) == {"-kiwi": "Kiwi"}
+    p.write_text('["-kiwi"]')
+    with pytest.raises(PlanError):
+        load_names(p)

@@ -20,7 +20,7 @@ from cotw.compose import (
     probe,
     run_ffmpeg,
 )
-from cotw.plan import PlanError, Timeline, build_timeline, load_report, merge_timelines
+from cotw.plan import PlanError, Timeline, build_timeline, load_names, load_report, merge_timelines
 
 
 def render_assets(
@@ -84,8 +84,12 @@ def _save(img, path: Path) -> Path:
 @click.option("--channel", default="FuzzyHatTV", show_default=True, help="Channel name on the end card.")
 @click.option("--next-up", default="", help='End card "Next up" label, e.g. EP.08.')
 @click.option("--team", default="", help="Team shown on every lower third (not in the JSON).")
+@click.option("--names", "names_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="JSON of display-name overrides (default: ./names.json if present).")
 @click.option("--title-style", type=click.Choice(["center", "cinematic"]), default="center", show_default=True)
 @click.option("--title-seconds", type=float, default=5.0, show_default=True)
+@click.option("--lower-third-seconds", type=float, default=Options.lower_third_seconds, show_default=True,
+              help="How long each lower third stays up (including its fades).")
 @click.option("--end-seconds", type=float, default=15.0, show_default=True)
 @click.option("--end-card", "end_mode", type=click.Choice(["append", "overlay", "off"]), default="append",
               show_default=True, help="append: add the card after the video; overlay: cover its last seconds.")
@@ -102,8 +106,8 @@ def _save(img, path: Path) -> Path:
               help="Render the graphics into this folder and stop (visual check).")
 @click.option("--dry-run", is_flag=True, help="Print the timeline and FFmpeg command without encoding.")
 def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None, episode: int, week: str, featuring: str,
-         league: str, channel: str, next_up: str, team: str, title_style: str, title_seconds: float,
-         end_seconds: float, end_mode: str, no_title: bool, no_bug: bool, no_lower_thirds: bool, no_punch: bool,
+         league: str, channel: str, next_up: str, team: str, names_path: Path | None, title_style: str, title_seconds: float,
+         end_seconds: float, lower_third_seconds: float, end_mode: str, no_title: bool, no_bug: bool, no_lower_thirds: bool, no_punch: bool,
          clips_dir: Path | None, encoder: str, quality: int, ffmpeg_path: Path | None,
          graphics_only: Path | None, dry_run: bool) -> None:
     """Overlay LANChamp COTW graphics onto VIDEOS (cs2-highlights MP4s, each with its JSON).
@@ -126,6 +130,10 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
 
     try:
         ffmpeg = find_ffmpeg(ffmpeg_path)
+        names_path = names_path or (Path("names.json") if Path("names.json").is_file() else None)
+        names = load_names(names_path) if names_path else {}
+        if names_path:
+            click.echo(f"Display names: {names_path} ({len(names)} entries)")
         mains, timelines = [], []
         for v in videos:
             info = probe(ffmpeg, v)
@@ -136,7 +144,7 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
                     int(p.stem.split("_")[1]): probe(ffmpeg, p).duration
                     for p in sorted(clips_dir.glob("clip_*.mp4"))
                 }
-            tl = build_timeline(report, video_duration=info.duration, clip_durations=clip_durations)
+            tl = build_timeline(report, video_duration=info.duration, clip_durations=clip_durations, names=names)
             if abs(tl.duration - info.duration) > 1.0:
                 click.echo(f"warning: {v.name}: JSON clips total {tl.duration:.1f}s but the video is "
                            f"{info.duration:.1f}s; overlay times may be off.", err=True)
@@ -153,7 +161,7 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
         click.echo(f"  #{c.number:<2} {c.start:7.1f}s +{c.duration:5.1f}s  {c.player} · {c.stat}{punch}")
 
     meta = graphics.EpisodeMeta(episode, week, featuring, league, channel, next_up)
-    opts = Options(title_seconds=title_seconds, end_seconds=end_seconds,
+    opts = Options(title_seconds=title_seconds, end_seconds=end_seconds, lower_third_seconds=lower_third_seconds,
                    end_mode="append" if end_mode == "off" else end_mode, encoder=encoder, quality=quality)
 
     keep = graphics_only is not None

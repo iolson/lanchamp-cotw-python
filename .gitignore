@@ -5,3 +5,4 @@ __pycache__/
 *.mp4
 files/
 .DS_Store
+names.json

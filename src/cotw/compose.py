@@ -48,7 +48,7 @@ class Options:
     end_seconds: float = 15.0
     end_mode: str = "append"  # "append" (extra card after the video) or "overlay" (over its last seconds)
     lower_third_delay: float = 1.0
-    lower_third_seconds: float = 4.5
+    lower_third_seconds: float = 7.0
     punch_delay: float = 0.3
     punch_fps: int = 30
     encoder: str = "libx264"  # or "h264_nvenc"
