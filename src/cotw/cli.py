@@ -34,6 +34,7 @@ def render_assets(
     title_style: str,
     bug: bool,
     lower_thirds: bool,
+    lt_scale: float,
     punches: bool,
     title: bool,
     end: bool,
@@ -50,7 +51,7 @@ def render_assets(
 
     for clip in timeline.clips:
         if lower_thirds:
-            img = graphics.lower_third(clip.player, clip.team or team, clip.stat, clip.context)
+            img = graphics.lower_third(clip.player, clip.team or team, clip.stat, clip.context, lt_scale)
             assets.lower_thirds[clip.number] = save(img, f"lower_third_{clip.number:02d}.png")
         if punches and clip.punch:
             frames = work / f"punch_{clip.number:02d}"
@@ -82,7 +83,7 @@ def _save(img, path: Path) -> Path:
 @click.option("--week", default="", help='Title card "Week of ..." text, e.g. "Oct 20".')
 @click.option("--featuring", default="", help="Title card featuring line, e.g. 'Saltcrew · Free Agents'.")
 @click.option("--league", default="", help="Title card league tag, e.g. ESEA.")
-@click.option("--channel", default="FuzzyHatTV", show_default=True, help="Channel name on the end card.")
+@click.option("--channel", default="@LANChampGG", show_default=True, help="Channel name on the end card.")
 @click.option("--next-up", default="", help='End card "Next up" label, e.g. EP.08.')
 @click.option("--team", default="", help="Default team for players without one in names.json.")
 @click.option("--names", "names_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
@@ -91,6 +92,8 @@ def _save(img, path: Path) -> Path:
 @click.option("--title-seconds", type=float, default=5.0, show_default=True)
 @click.option("--lower-third-seconds", type=float, default=Options.lower_third_seconds, show_default=True,
               help="How long each lower third stays up (including its fades).")
+@click.option("--lower-third-scale", type=float, default=0.65, show_default=True,
+              help="Size of the lower third (1.0 is the original 750 px wide plate).")
 @click.option("--end-seconds", type=float, default=15.0, show_default=True)
 @click.option("--end-card", "end_mode", type=click.Choice(["append", "overlay", "off"]), default="append",
               show_default=True, help="append: add the card after the video; overlay: cover its last seconds.")
@@ -115,7 +118,7 @@ def _save(img, path: Path) -> Path:
 def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None, episode: int, week: str, featuring: str,
          league: str, channel: str, next_up: str, team: str, names_path: Path | None, title_style: str, title_seconds: float,
          order: str, reverse: bool, seed: int | None, pick: str | None, skip: str | None,
-         end_seconds: float, lower_third_seconds: float, end_mode: str, no_title: bool, no_bug: bool, no_lower_thirds: bool, no_punch: bool,
+         end_seconds: float, lower_third_seconds: float, lower_third_scale: float, end_mode: str, no_title: bool, no_bug: bool, no_lower_thirds: bool, no_punch: bool,
          clips_dir: Path | None, encoder: str, quality: int, ffmpeg_path: Path | None,
          graphics_only: Path | None, dry_run: bool) -> None:
     """Overlay LANChamp COTW graphics onto VIDEOS (cs2-highlights MP4s, each with its JSON).
@@ -187,7 +190,7 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
         click.echo("Rendering graphics...")
         assets = render_assets(
             timeline, meta, opts, work, team=team, title_style=title_style, bug=not no_bug,
-            lower_thirds=not no_lower_thirds, punches=not no_punch, title=not no_title, end=end_mode != "off",
+            lower_thirds=not no_lower_thirds, lt_scale=lower_third_scale, punches=not no_punch, title=not no_title, end=end_mode != "off",
         )
         if graphics_only:
             click.echo(f"Graphics written to {work}")

@@ -33,7 +33,7 @@ class EpisodeMeta:
     week: str = ""
     featuring: str = ""
     league: str = ""
-    channel: str = "FuzzyHatTV"
+    channel: str = "@LANChampGG"
     next_up: str = ""
 
     @property
@@ -95,12 +95,16 @@ def corner_bug(meta: EpisodeMeta) -> Image.Image:
     return c.finish()
 
 
-def lower_third(player: str, team: str, stat: str, context: str) -> Image.Image:
-    """Player name plate (transparent). The corner bug is a separate overlay."""
+def lower_third(player: str, team: str, stat: str, context: str, scale: float = 0.65) -> Image.Image:
+    """Player name plate (transparent). The corner bug is a separate overlay.
+
+    `scale` shrinks the plate (type, padding and box) while its bottom-left corner stays put.
+    """
+    k = scale
     c = Canvas()
-    origin_x, box_h, bottom_m = 96, 156, 150
+    origin_x, box_h, bottom_m = 96, round(156 * k), 150
     box_top = H - bottom_m - box_h
-    name_size = 66
+    name_size = round(66 * k)
     name_w = c.measure(player or "player", "display", 700, name_size)
 
     parts = [p for p in (team, stat, context) if p]
@@ -109,19 +113,19 @@ def lower_third(player: str, team: str, stat: str, context: str) -> Image.Image:
         if i:
             segs.append(("   ·   ", MUTED2))
         segs.append((p.upper(), GOLD if p == stat else (WHITE if i == 0 else MUTED)))
-    sub_size, sub_ls = 23, 3
+    sub_size, sub_ls = round(23 * k), 3 * k
     sub_w = sum(c.measure(t, "mono", 500, sub_size, sub_ls) for t, _ in segs)
 
-    pad_l, pad_r, spine = 34, 40, 8
+    pad_l, pad_r, spine = round(34 * k), round(40 * k), max(4, round(8 * k))
     body_w = max(name_w, sub_w) + pad_l + pad_r
     body_x = origin_x + spine
     c.rect(origin_x, box_top, spine, box_h, color(CYAN))
     c.rect(body_x, box_top, body_w, box_h, color("#080C12", 0.84))
     c.outline(body_x, box_top, body_w, box_h, color("#FFFFFF", 0.14), 1.5)
-    c.text(player or "player", body_x + pad_l, box_top + 86, family="display", weight=700, size=name_size, fill=color(WHITE))
+    c.text(player or "player", body_x + pad_l, box_top + 86 * k, family="display", weight=700, size=name_size, fill=color(WHITE))
     sx = body_x + pad_l
     for t, col in segs:
-        c.text(t, sx, box_top + 128, family="mono", weight=500, size=sub_size, ls=sub_ls, fill=color(col))
+        c.text(t, sx, box_top + 128 * k, family="mono", weight=500, size=sub_size, ls=sub_ls, fill=color(col))
         sx += c.measure(t, "mono", 500, sub_size, sub_ls)
     return c.finish()
 

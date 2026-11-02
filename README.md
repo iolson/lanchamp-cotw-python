@@ -76,6 +76,8 @@ cotw files --episode 1 -o output/cotw-ep01.mp4
 | `--reverse` | Flip the order, e.g. `--order score --reverse` for best first |
 | `--seed N` | Repeat a `shuffle` cut |
 | `--pick 3,1,5` / `--skip 2,4` | Use only these clips in this order / leave clips out |
+| `--lower-third-scale X` | Lower-third size (default 0.65; 1.0 is the original, larger plate) |
+| `--channel NAME` | Handle on the end card (default `@LANChampGG`) |
 | `--lower-third-seconds N` | How long each lower third stays up (default 7) |
 | `--title-style center\|cinematic` | Title card style |
 | `--no-title / --no-bug / --no-lower-thirds / --no-punch` | Drop individual graphics |

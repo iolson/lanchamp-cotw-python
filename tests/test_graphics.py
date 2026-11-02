@@ -1,7 +1,7 @@
 from cotw import graphics
 from cotw.graphics import EpisodeMeta
 
-META = EpisodeMeta(7, "Oct 20", "Saltcrew", "ESEA", "FuzzyHatTV", "EP.08")
+META = EpisodeMeta(7, "Oct 20", "Saltcrew", "ESEA", "@LANChampGG", "EP.08")
 
 
 def test_transparent_overlays_keep_alpha():
