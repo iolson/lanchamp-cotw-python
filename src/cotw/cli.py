@@ -15,6 +15,7 @@ from cotw.compose import (
     Assets,
     FfmpegError,
     Options,
+    audio_duration,
     build_args,
     find_ffmpeg,
     probe,
@@ -103,6 +104,14 @@ def _save(img, path: Path) -> Path:
 @click.option("--seed", type=int, help="Seed for --order shuffle, to repeat a cut.")
 @click.option("--pick", help="Only these clip numbers, in this order, e.g. 3,1,5 (numbers from the clip list).")
 @click.option("--skip", help="Leave these clip numbers out, e.g. 2,4.")
+@click.option("--kill-padding", type=float, help="Trim each clip to this many seconds before its first kill and "
+              "after its last (e.g. 2.5). Default: keep the whole clip.")
+@click.option("--music", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Music track (MP3/WAV), played once from after the title card (faded out if longer than the episode) and ducked under the game audio.")
+@click.option("--music-volume", type=float, default=Options.music_volume, show_default=True,
+              help="Music level before ducking (1.0 = the track's own volume).")
+@click.option("--music-start", type=float,
+              help="Seconds into the episode when the music starts (default: right after the title card).")
 @click.option("--no-title", is_flag=True, help="Skip the title card.")
 @click.option("--no-bug", is_flag=True, help="Skip the corner bug.")
 @click.option("--no-lower-thirds", is_flag=True)
@@ -110,6 +119,8 @@ def _save(img, path: Path) -> Path:
 @click.option("--clips-dir", type=click.Path(exists=True, file_okay=False, path_type=Path),
               help="Folder with clip_NN.mp4 files; their real lengths replace the JSON's rounded durations.")
 @click.option("--encoder", type=click.Choice(["libx264", "h264_nvenc"]), default="libx264", show_default=True)
+@click.option("--fps", type=int, default=Options.fps, show_default=True,
+              help="Output frame rate (sources can be 120 fps for slow motion).")
 @click.option("--quality", type=int, default=18, show_default=True, help="CRF (libx264) / CQ (nvenc).")
 @click.option("--ffmpeg", "ffmpeg_path", type=click.Path(dir_okay=False, path_type=Path), help="Path to ffmpeg.")
 @click.option("--graphics-only", type=click.Path(file_okay=False, path_type=Path),
@@ -117,9 +128,10 @@ def _save(img, path: Path) -> Path:
 @click.option("--dry-run", is_flag=True, help="Print the timeline and FFmpeg command without encoding.")
 def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None, episode: int, week: str, featuring: str,
          league: str, channel: str, next_up: str, team: str, names_path: Path | None, title_style: str, title_seconds: float,
+         kill_padding: float | None, music: Path | None, music_volume: float, music_start: float | None,
          order: str, reverse: bool, seed: int | None, pick: str | None, skip: str | None,
          end_seconds: float, lower_third_seconds: float, lower_third_scale: float, end_mode: str, no_title: bool, no_bug: bool, no_lower_thirds: bool, no_punch: bool,
-         clips_dir: Path | None, encoder: str, quality: int, ffmpeg_path: Path | None,
+         clips_dir: Path | None, encoder: str, fps: int, quality: int, ffmpeg_path: Path | None,
          graphics_only: Path | None, dry_run: bool) -> None:
     """Overlay LANChamp COTW graphics onto VIDEOS (cs2-highlights MP4s, each with its JSON).
 
@@ -155,8 +167,9 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
                     int(p.stem.split("_")[1]): probe(ffmpeg, p).duration
                     for p in sorted(clips_dir.glob("clip_*.mp4"))
                 }
-            tl = build_timeline(report, video_duration=info.duration, clip_durations=clip_durations, names=names)
-            if abs(tl.duration - info.duration) > 1.0:
+            tl = build_timeline(report, video_duration=info.duration, clip_durations=clip_durations, names=names,
+                                kill_padding=kill_padding)
+            if kill_padding is None and abs(tl.duration - info.duration) > 1.0:
                 click.echo(f"warning: {v.name}: JSON clips total {tl.duration:.1f}s but the video is "
                            f"{info.duration:.1f}s; overlay times may be off.", err=True)
             click.echo(f"{v.name}: {info.width}x{info.height} @ {float(info.fps):.2f}fps, {info.duration:.1f}s, "
@@ -181,7 +194,9 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
 
     meta = graphics.EpisodeMeta(episode, week, featuring, league, channel, next_up)
     opts = Options(title_seconds=title_seconds, end_seconds=end_seconds, lower_third_seconds=lower_third_seconds,
-                   end_mode="append" if end_mode == "off" else end_mode, encoder=encoder, quality=quality)
+                   end_mode="append" if end_mode == "off" else end_mode, encoder=encoder, quality=quality, fps=fps,
+                   music=music, music_volume=music_volume, music_start=music_start,
+                   music_duration=audio_duration(ffmpeg, music) if music else None)
 
     keep = graphics_only is not None
     work = graphics_only or Path(tempfile.mkdtemp(prefix="cotw-"))

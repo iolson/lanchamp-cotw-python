@@ -76,8 +76,11 @@ cotw files --episode 1 -o output/cotw-ep01.mp4
 | `--reverse` | Flip the order, e.g. `--order score --reverse` for best first |
 | `--seed N` | Repeat a `shuffle` cut |
 | `--pick 3,1,5` / `--skip 2,4` | Use only these clips in this order / leave clips out |
-| `--lower-third-scale X` | Lower-third size (default 0.65; 1.0 is the original, larger plate) |
+| `--kill-padding N` | Trim each clip to N seconds before its first kill and after its last (uses the report's `beat_targets`) |
+| `--music FILE` | Music bed: starts after the title card, plays once, ducked under the game audio (`--music-volume`, default 0.25; `--music-start` to move it) |
+| `--fps N` | Output frame rate (default 60; 120 fps sources are just headroom for slow motion) |
 | `--channel NAME` | Handle on the end card (default `@LANChampGG`) |
+| `--lower-third-scale X` | Lower-third size (default 0.65; 1.0 is the original, larger plate) |
 | `--lower-third-seconds N` | How long each lower third stays up (default 7) |
 | `--title-style center\|cinematic` | Title card style |
 | `--no-title / --no-bug / --no-lower-thirds / --no-punch` | Drop individual graphics |
@@ -97,6 +100,16 @@ from one player when it can). Run once with `--dry-run` to see the numbered clip
 cotw files --episode 1 --order score -o output/cotw-ep01.mp4
 cotw files --episode 1 --pick 4,2,1 -o output/cotw-ep01.mp4
 ```
+
+## Music
+
+```bash
+cotw files --episode 1 --order score --kill-padding 2.5 --music "files/song.mp3" -o output/cotw-ep01.mp4
+```
+
+The track starts when the title card ends and fades in. If it is shorter than the episode it plays
+once and ends on its own (the end card carries on without it); if it is longer it is cut with a
+3 s fade-out. It is ducked automatically whenever the game audio is loud. Needs FFmpeg 4.4+.
 
 ## Player names and teams
 
