@@ -141,8 +141,17 @@ def build_timeline(
     the whole timeline is rescaled to it; `clip_durations` (probed per-clip files) win outright.
     """
     seqs = sorted(report["sequences"], key=lambda s: s["number"])
-    durations = [float((clip_durations or {}).get(s["number"], s["duration_seconds"])) for s in seqs]
-    if not clip_durations and video_duration:
+    # Newer reports say where each clip sits in the video. Sequences without that (e.g. cinematic
+    # variants that were never rendered into this MP4) are not in the video and must be ignored.
+    placed = any("video_start_seconds" in s for s in seqs)
+    if placed:
+        seqs = [s for s in seqs if "video_start_seconds" in s]
+    exact = placed and not clip_durations
+    durations = [
+        float((clip_durations or {}).get(s["number"], s["clip_duration_seconds"] if exact else s["duration_seconds"]))
+        for s in seqs
+    ]
+    if not clip_durations and not exact and video_duration:
         total = sum(durations)
         if total <= 0:
             raise PlanError("report sequences have no duration")
@@ -152,6 +161,8 @@ def build_timeline(
     clips: list[ClipPlan] = []
     t = 0.0
     for seq, dur in zip(seqs, durations):
+        if exact:
+            t = float(seq["video_start_seconds"])
         moments = seq.get("moments") or []
         best = max(moments, key=lambda m: m.get("score", 0)) if moments else {}
         stat, punch = describe_moment(best) if best else (seq.get("label", "HIGHLIGHT").upper(), None)

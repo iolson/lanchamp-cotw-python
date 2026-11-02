@@ -158,3 +158,17 @@ def test_shuffle_is_seeded_and_avoids_same_player_neighbours():
 
 def test_parse_numbers():
     assert parse_numbers("3, 1,5") == [3, 1, 5]
+
+
+def test_sequences_not_in_the_video_are_ignored_and_timing_is_exact():
+    report = {
+        "map": "de_nuke",
+        "sequences": [
+            {"number": 1, "round": 3, "duration_seconds": 12.0, "clip_duration_seconds": 12.04,
+             "video_start_seconds": 0.0, "moments": []},
+            {"number": 2, "round": 3, "duration_seconds": 12.0, "cinematic": {"campath": "A4.dz"}, "moments": []},
+        ],
+    }
+    tl = build_timeline(report, video_duration=12.04)
+    assert [c.number for c in tl.clips] == [1]
+    assert tl.clips[0].duration == 12.04 and tl.duration == 12.04
