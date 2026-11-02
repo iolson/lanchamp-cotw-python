@@ -14,24 +14,56 @@ The graphics are Python (Pillow) ports of the templates in
 fonts (bundled in `src/cotw/fonts`, all SIL OFL). If you change a template in the web tool,
 update `src/cotw/graphics.py` to match.
 
-## Install (Windows 11)
+## Install
+
+Needs Python 3.11+ and FFmpeg. It runs on Windows 11 and macOS (the CS2 recording step in
+cs2-highlights is Windows-only, but this tool only post-processes the finished MP4 and JSON, so
+it works anywhere).
+
+**Windows 11 (PowerShell)**
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\pip install -e .[dev]
+.venv\Scripts\cotw --help
 ```
 
-FFmpeg is found via `--ffmpeg`, `$env:COTW_FFMPEG`, the copy `highlights update-tools`
-downloads to `~\.cs2-highlights\tools\ffmpeg\bin`, then `PATH`.
+**macOS (Terminal)**
+
+```bash
+brew install ffmpeg python@3.12      # skip whatever you already have
+python3 -m venv .venv
+.venv/bin/pip install -e '.[dev]'    # quotes needed in zsh
+.venv/bin/cotw --help
+```
+
+Activate the venv (`.venv\Scripts\Activate.ps1` on Windows, `source .venv/bin/activate` on
+macOS) to type plain `cotw` instead of the full path.
+
+FFmpeg is found via `--ffmpeg`, then `COTW_FFMPEG` (`$env:COTW_FFMPEG` in PowerShell,
+`export COTW_FFMPEG=...` on macOS), then, on Windows, the copy `highlights update-tools`
+downloads to `~\.cs2-highlights\tools\ffmpeg\bin`, then `PATH`. A Homebrew install is on
+`PATH`, so on macOS there's nothing to configure.
 
 ## Usage
 
-```powershell
-cotw match-highlights.mp4 --episode 7 --week "Oct 20" --featuring "Saltcrew · Free Agents" `
+One highlights video (Windows PowerShell uses a backtick for line continuation, macOS a
+backslash):
+
+```bash
+cotw match-highlights.mp4 --episode 7 --week "Oct 20" --featuring "Saltcrew · Free Agents" \
      --league ESEA --team Saltcrew --next-up EP.08
 ```
 
 Reads `match-highlights.json` next to the video and writes `match-highlights-cotw.mp4`.
+
+A whole episode: pass several videos, or a folder of them. Each video needs its own JSON beside
+it. They are joined in filename order and the output defaults to `cotw-epNN.mp4` (use `-o`,
+e.g. `-o output/cotw-ep01.mp4`; `output/` is git-ignored):
+
+```bash
+cotw files --episode 1 -o output/cotw-ep01.mp4
+```
 
 | Option | Purpose |
 | --- | --- |
@@ -43,7 +75,7 @@ Reads `match-highlights.json` next to the video and writes `match-highlights-cot
 | `--lower-third-seconds N` | How long each lower third stays up (default 7) |
 | `--title-style center\|cinematic` | Title card style |
 | `--no-title / --no-bug / --no-lower-thirds / --no-punch` | Drop individual graphics |
-| `--encoder h264_nvenc` | GPU encode (default `libx264`, CRF `--quality 18`) |
+| `--encoder h264_nvenc` | NVIDIA GPU encode, Windows/Linux only (default `libx264`, CRF `--quality 18`) |
 | `--graphics-only DIR` | Render the PNGs/frames to `DIR` and stop, to eyeball the look |
 | `--dry-run` | Print the timeline and the FFmpeg command only |
 
@@ -88,6 +120,7 @@ encode speed on CPU; use `--encoder h264_nvenc` to go faster.
 
 ## Tests
 
-```powershell
-.venv\Scripts\python -m pytest -q
+```bash
+.venv/bin/python -m pytest -q          # macOS
+.venv\Scripts\python -m pytest -q      # Windows
 ```
