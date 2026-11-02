@@ -172,3 +172,26 @@ def test_sequences_not_in_the_video_are_ignored_and_timing_is_exact():
     tl = build_timeline(report, video_duration=12.04)
     assert [c.number for c in tl.clips] == [1]
     assert tl.clips[0].duration == 12.04 and tl.duration == 12.04
+
+
+def test_kill_padding_trims_to_the_kills_and_keeps_source_positions():
+    report = {
+        "map": "de_nuke",
+        "sequences": [
+            {"number": 1, "round": 3, "duration_seconds": 30.0, "clip_duration_seconds": 30.0,
+             "video_start_seconds": 0.0, "moments": []},
+            {"number": 2, "round": 4, "duration_seconds": 10.0, "clip_duration_seconds": 10.0,
+             "video_start_seconds": 30.0, "moments": []},
+        ],
+        "beat_targets": [
+            {"sequence": 1, "clip_time_seconds": 4.0}, {"sequence": 1, "clip_time_seconds": 20.0},
+            {"sequence": 2, "clip_time_seconds": 5.0},
+        ],
+    }
+    tl = build_timeline(report, kill_padding=2.5)
+    a, b = tl.clips
+    assert (a.src_start, a.duration, a.start, a.trimmed) == (1.5, 21.0, 0.0, True)
+    assert (b.src_start, b.duration, b.start) == (32.5, 5.0, 21.0)
+    assert tl.duration == 26.0
+    whole = build_timeline(report)
+    assert whole.duration == 40.0 and not whole.clips[0].trimmed

@@ -88,3 +88,36 @@ def test_clips_are_cut_from_their_source_video_in_timeline_order():
     assert joined.index("b.mp4") < joined.index("a.mp4")
     assert "[mv0][ma0][mv1][ma1]concat=n=2:v=1:a=1[v0][amain]" in g
     assert "anullsrc" in joined  # b has no audio
+
+
+def test_music_that_fits_plays_once_and_ends_naturally():
+    opts = Options(music=Path("song.mp3"), music_volume=0.3, music_duration=20.0)
+    args = build_args(MAIN, TL, _assets(), opts, Path("o.mp4"))
+    g = _graph(args)
+    assert "-stream_loop" not in args
+    assert "volume=0.3" in g and "adelay=5000:all=1" in g  # starts after the 5s title card
+    assert "apad=whole_dur=50" in g  # 5 + 30 + 15
+    assert "atrim" not in g and "afade=t=out:st=" not in g.split("[mus]")[0]
+    assert "sidechaincompress" in g and "amix=inputs=2:duration=first:normalize=0[aout]" in g
+
+
+def test_music_longer_than_the_episode_is_cut_with_a_fade_out():
+    opts = Options(music=Path("song.mp3"), music_duration=300.0)
+    g = _graph(build_args(MAIN, TL, _assets(), opts, Path("o.mp4")))
+    assert "atrim=end=45" in g and "afade=t=out:st=42:d=3" in g
+
+
+def test_no_music_keeps_plain_audio_path():
+    assert "sidechaincompress" not in _graph(build_args(MAIN, TL, _assets(), Options(), Path("o.mp4")))
+
+
+def test_trimmed_clips_get_audio_fades():
+    tl = Timeline([ClipPlan(1, 0.0, 10.0, "a", "3K", "c", None, trimmed=True, src_start=2.0)], 10.0)
+    g = _graph(build_args(MAIN, tl, _assets(lower_thirds={}, punches={}), Options(), Path("o.mp4")))
+    assert "afade=t=in:d=0.03" in g and "[mv0][mf0]" in g
+
+
+def test_output_is_60fps_even_from_120fps_sources():
+    info = MediaInfo(1920, 1080, Fraction(120), 30.0, True)
+    g = _graph(build_args([(Path("in.mp4"), info)], TL, _assets(), Options(), Path("o.mp4")))
+    assert "fps=60," in g and "fps=120" not in g

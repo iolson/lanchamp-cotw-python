@@ -18,6 +18,7 @@ LT_FADE = 0.3  # lower-third alpha fade in/out
 LT_SLIDE = 0.45  # lower-third slide-in time
 LT_SLIDE_PX = 400
 PUNCH_FADE_OUT = 0.25
+CUT_FADE = 0.03  # audio fade at the edges of a trimmed clip
 
 
 class FfmpegError(RuntimeError):
@@ -53,6 +54,13 @@ class Options:
     punch_fps: int = 30
     encoder: str = "libx264"  # or "h264_nvenc"
     quality: int = 18  # CRF / CQ
+    fps: int = 60  # output frame rate; 120 fps sources are only headroom for slow motion
+    music: Path | None = None
+    music_volume: float = 0.25
+    music_duration: float | None = None  # track length; the music plays once and ends on its own if it fits
+    music_start: float | None = None  # seconds into the episode; None = right after the title card
+    music_fade_in: float = 1.5
+    music_fade_out: float = 3.0
 
 
 def find_ffmpeg(explicit: Path | None = None) -> Path:
@@ -100,6 +108,17 @@ def probe(ffmpeg: Path, path: Path) -> MediaInfo:
     )
 
 
+def audio_duration(ffmpeg: Path, path: Path) -> float:
+    result = subprocess.run(
+        [_ffprobe(ffmpeg), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True,
+    )
+    try:
+        return float(result.stdout.strip())
+    except ValueError as exc:
+        raise FfmpegError(f"ffprobe could not read {path}: {result.stderr.strip()}") from exc
+
+
 def _num(x: float) -> str:
     return f"{x:.3f}".rstrip("0").rstrip(".")
 
@@ -121,6 +140,32 @@ class _Graph:
         self.chains.append(spec)
 
 
+def _music_bed(g: _Graph, opts: Options, total: float, title: float) -> None:
+    """Play the track once from after the title card, ducked under the game audio.
+
+    A track that ends before the episode does ends naturally; a longer one is cut with a fade-out.
+    """
+    start = title if opts.music_start is None else opts.music_start
+    start = min(max(0.0, start), total)
+    room = max(0.1, total - start)
+    cut = opts.music_duration is None or opts.music_duration > room
+    length = room if cut else opts.music_duration
+    tail = (
+        f"atrim=end={_num(room)},asetpts=PTS-STARTPTS,"
+        f"afade=t=out:st={_num(room - min(opts.music_fade_out, room))}:d={_num(min(opts.music_fade_out, room))},"
+        if cut else ""
+    )
+    i = g.add_input("-i", str(opts.music))
+    g.chain(
+        f"[{i}:a]aresample=48000,aformat=channel_layouts=stereo,volume={opts.music_volume},{tail}"
+        f"afade=t=in:d={_num(min(opts.music_fade_in, length))},"
+        f"adelay={int(start * 1000)}:all=1,apad=whole_dur={_num(total)}[mus]"
+    )
+    g.chain("[agame]asplit=2[agame1][agame2]")
+    g.chain("[mus][agame2]sidechaincompress=threshold=0.03:ratio=6:attack=30:release=500[musd]")
+    g.chain("[agame1][musd]amix=inputs=2:duration=first:normalize=0[aout]")
+
+
 def build_args(
     mains: list[tuple[Path, MediaInfo]],
     timeline: Timeline,
@@ -130,7 +175,7 @@ def build_args(
 ) -> list[str]:
     g = _Graph()
     info = mains[0][1]  # the first video sets the output size and frame rate
-    fps = f"{info.fps.numerator}/{info.fps.denominator}"
+    fps = str(opts.fps)
     size = f"{info.width}:{info.height}"
     needs_scale = (info.width, info.height) != (W, H)
     rgba = f"format=rgba,scale={size}" if needs_scale else "format=rgba"
@@ -143,6 +188,7 @@ def build_args(
         return g.add_input("-f", "lavfi", "-t", _num(seconds), "-i", "anullsrc=r=48000:cl=stereo")
 
     # Each clip is cut from its source video (in timeline order), normalised, then joined.
+    ma = {k: f"ma{k}" for k in range(len(timeline.clips))}
     for k, clip in enumerate(timeline.clips):
         path, mi = mains[clip.source]
         seek = ["-ss", _num(clip.src_start), "-t", _num(clip.duration)]
@@ -153,8 +199,11 @@ def build_args(
         else:
             sil = silence(clip.duration)
             g.chain(f"[{sil}:a]anull[ma{k}]")
+        if clip.trimmed:  # tiny fades so the cuts don't click
+            g.chain(f"[ma{k}]afade=t=in:d={CUT_FADE},afade=t=out:st={_num(max(0.0, clip.duration - CUT_FADE))}:d={CUT_FADE}[mf{k}]")
+            ma[k] = f"mf{k}"
     n = len(timeline.clips)
-    joined_main = "".join(f"[mv{k}][ma{k}]" for k in range(n))
+    joined_main = "".join(f"[mv{k}][{ma[k]}]" for k in range(n))
     g.chain(f"{joined_main}concat=n={n}:v=1:a=1[v0][amain]")
     cur, step = "v0", 0
 
@@ -224,7 +273,14 @@ def build_args(
         segments.append(("vend", "aend"))
 
     joined = "".join(f"[{v}][{a}]" for v, a in segments)
-    g.chain(f"{joined}concat=n={len(segments)}:v=1:a=1[vout][aout]")
+    total = (opts.title_seconds if assets.title and opts.title_seconds > 0 else 0.0) + main_dur
+    if assets.end and opts.end_mode == "append" and opts.end_seconds > 0:
+        total += opts.end_seconds
+    if opts.music:
+        g.chain(f"{joined}concat=n={len(segments)}:v=1:a=1[vout][agame]")
+        _music_bed(g, opts, total, title=opts.title_seconds if assets.title else 0.0)
+    else:
+        g.chain(f"{joined}concat=n={len(segments)}:v=1:a=1[vout][aout]")
 
     if opts.encoder == "h264_nvenc":
         venc = ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", str(opts.quality), "-b:v", "0"]

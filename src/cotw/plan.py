@@ -35,6 +35,7 @@ class ClipPlan:
     score: float = 0.0  # best moment's score, used by --order score
     source: int = 0  # index of the highlights video this clip is cut from
     src_start: float = 0.0  # where the clip starts inside that video
+    trimmed: bool = False  # cut down to the kills; the audio gets short fades at the cut points
 
 
 @dataclass(frozen=True)
@@ -134,11 +135,15 @@ def build_timeline(
     video_duration: float | None = None,
     clip_durations: dict[int, float] | None = None,
     names: dict[str, PlayerInfo] | None = None,
+    kill_padding: float | None = None,
 ) -> Timeline:
     """Lay the report's sequences end to end.
 
     `duration_seconds` in the report is rounded to 0.1s, so when the real video length is known
     the whole timeline is rescaled to it; `clip_durations` (probed per-clip files) win outright.
+
+    `kill_padding` trims each clip to that many seconds before its first kill and after its last
+    (from the report's `beat_targets`); it needs the exact clip positions of newer reports.
     """
     seqs = sorted(report["sequences"], key=lambda s: s["number"])
     # Newer reports say where each clip sits in the video. Sequences without that (e.g. cinematic
@@ -159,10 +164,23 @@ def build_timeline(
 
     map_name = _map_label(report.get("map", ""))
     clips: list[ClipPlan] = []
-    t = 0.0
+    kills: dict[int, list[float]] = {}
+    for b in report.get("beat_targets") or []:
+        kills.setdefault(b.get("sequence"), []).append(float(b["clip_time_seconds"]))
+
+    t = 0.0  # position in the source video
+    out = 0.0  # position in the finished episode
     for seq, dur in zip(seqs, durations):
         if exact:
             t = float(seq["video_start_seconds"])
+        lead, trimmed = 0.0, False
+        ks = kills.get(seq["number"])
+        if kill_padding is not None and exact and ks:
+            lo, hi = max(0.0, min(ks) - kill_padding), min(dur, max(ks) + kill_padding)
+            lead, trimmed = lo, hi - lo < dur - 0.05
+            seq_dur, dur = dur, hi - lo
+        else:
+            seq_dur = dur
         moments = seq.get("moments") or []
         best = max(moments, key=lambda m: m.get("score", 0)) if moments else {}
         stat, punch = describe_moment(best) if best else (seq.get("label", "HIGHLIGHT").upper(), None)
@@ -173,11 +191,12 @@ def build_timeline(
         player = best.get("player") or cam.get("name", "")
         info = _lookup(player, str(best.get("steamid") or cam.get("steamid") or ""), names or {})
         clips.append(
-            ClipPlan(seq["number"], t, dur, info.name or player, stat, context, punch, info.team or "",
-                     score=float(best.get("score", 0)), src_start=t)
+            ClipPlan(seq["number"], out, dur, info.name or player, stat, context, punch, info.team or "",
+                     score=float(best.get("score", 0)), src_start=t + lead, trimmed=trimmed)
         )
-        t += dur
-    return Timeline(clips, t)
+        t += seq_dur
+        out += dur
+    return Timeline(clips, out)
 
 
 def merge_timelines(timelines: list[Timeline]) -> Timeline:
