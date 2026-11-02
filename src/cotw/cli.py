@@ -22,7 +22,8 @@ from cotw.compose import (
     run_ffmpeg,
 )
 from cotw.plan import PlanError, Timeline, build_timeline, load_names, load_report, merge_timelines
-from cotw.plan import ORDERS, arrange, parse_numbers
+from cotw.beats import BeatError, detect_beats
+from cotw.plan import ORDERS, SLOWMO_MODES, apply_slowmo, arrange, parse_numbers, snap_cuts
 
 
 def render_assets(
@@ -106,6 +107,15 @@ def _save(img, path: Path) -> Path:
 @click.option("--skip", help="Leave these clip numbers out, e.g. 2,4.")
 @click.option("--kill-padding", type=float, help="Trim each clip to this many seconds before its first kill and "
               "after its last (e.g. 2.5). Default: keep the whole clip.")
+@click.option("--slowmo", type=click.Choice(SLOWMO_MODES), default="none", show_default=True,
+              help="Slow motion around kills: the last kill of each clip, plus special kills / headshots, or every kill.")
+@click.option("--slowmo-clips", default="auto", show_default=True,
+              help="Which clips get slow motion: auto (signature clips: clutch/ace/4K, at most a third), "
+                   "all, or clip numbers like 3,5.")
+@click.option("--slowmo-speed", type=click.FloatRange(0.5, 0.95), default=0.5, show_default=True,
+              help="Playback speed inside slow motion (0.5 is smooth from a 120 fps source at 60 fps output).")
+@click.option("--snap-cuts", "snap_cuts_on", is_flag=True,
+              help="Move each cut onto the nearest beat of --music (needs librosa).")
 @click.option("--music", type=click.Path(exists=True, dir_okay=False, path_type=Path),
               help="Music track (MP3/WAV), played once from after the title card (faded out if longer than the episode) and ducked under the game audio.")
 @click.option("--music-volume", type=float, default=Options.music_volume, show_default=True,
@@ -128,7 +138,7 @@ def _save(img, path: Path) -> Path:
 @click.option("--dry-run", is_flag=True, help="Print the timeline and FFmpeg command without encoding.")
 def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None, episode: int, week: str, featuring: str,
          league: str, channel: str, next_up: str, team: str, names_path: Path | None, title_style: str, title_seconds: float,
-         kill_padding: float | None, music: Path | None, music_volume: float, music_start: float | None,
+         kill_padding: float | None, slowmo: str, slowmo_clips: str, slowmo_speed: float, snap_cuts_on: bool, music: Path | None, music_volume: float, music_start: float | None,
          order: str, reverse: bool, seed: int | None, pick: str | None, skip: str | None,
          end_seconds: float, lower_third_seconds: float, lower_third_scale: float, end_mode: str, no_title: bool, no_bug: bool, no_lower_thirds: bool, no_punch: bool,
          clips_dir: Path | None, encoder: str, fps: int, quality: int, ffmpeg_path: Path | None,
@@ -169,6 +179,9 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
                 }
             tl = build_timeline(report, video_duration=info.duration, clip_durations=clip_durations, names=names,
                                 kill_padding=kill_padding)
+            if slowmo != "none" and float(info.fps) < fps / slowmo_speed - 0.5:
+                click.echo(f"warning: {v.name} is {float(info.fps):.0f} fps; slow motion at {slowmo_speed}x needs "
+                           f"{fps / slowmo_speed:.0f} fps to stay smooth.", err=True)
             if kill_padding is None and abs(tl.duration - info.duration) > 1.0:
                 click.echo(f"warning: {v.name}: JSON clips total {tl.duration:.1f}s but the video is "
                            f"{info.duration:.1f}s; overlay times may be off.", err=True)
@@ -185,12 +198,26 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
                                pick=parse_numbers(pick) if pick else None,
                                skip=parse_numbers(skip) if skip else None)
             click.echo("Final order:")
-    except (FfmpegError, PlanError) as exc:
+        if slowmo != "none":
+            sel = slowmo_clips if slowmo_clips in ("auto", "all") else parse_numbers(slowmo_clips)
+            timeline = apply_slowmo(timeline, slowmo, slowmo_speed, sel)
+            click.echo("Slow motion on clip(s): " + (", ".join(f"#{c.number}" for c in timeline.clips if c.slow) or "none"))
+        if snap_cuts_on:
+            if not music:
+                raise click.UsageError("--snap-cuts needs --music")
+            title = 0.0 if no_title else title_seconds
+            beats = detect_beats(music)
+            if music_start is None and beats:  # put the track's first beat on the first cut
+                music_start = max(0.0, title - beats[0])
+            timeline = snap_cuts(timeline, beats, offset=title,
+                                 music_start=title if music_start is None else music_start)
+    except (FfmpegError, PlanError, BeatError) as exc:
         raise click.ClickException(str(exc)) from exc
 
     for c in timeline.clips:
         punch = f"  punch {c.punch.value}" if c.punch else ""
-        click.echo(f"  #{c.number:<2} {c.start:7.1f}s +{c.duration:5.1f}s  {c.player} · {c.stat}{punch}")
+        slow = f"  slow-mo x{len(c.slow)}" if c.slow else ""
+        click.echo(f"  #{c.number:<2} {c.start:7.1f}s +{c.duration:5.1f}s  {c.player} · {c.stat}{punch}{slow}")
 
     meta = graphics.EpisodeMeta(episode, week, featuring, league, channel, next_up)
     opts = Options(title_seconds=title_seconds, end_seconds=end_seconds, lower_third_seconds=lower_third_seconds,

@@ -86,7 +86,7 @@ def test_clips_are_cut_from_their_source_video_in_timeline_order():
     joined = " ".join(args)
     assert "-ss 1.5 -t 4 -i b.mp4" in joined and "-ss 0 -t 10 -i a.mp4" in joined
     assert joined.index("b.mp4") < joined.index("a.mp4")
-    assert "[mv0][ma0][mv1][ma1]concat=n=2:v=1:a=1[v0][amain]" in g
+    assert "[mv0_0][ma0_0][mv1_0][ma1_0]concat=n=2:v=1:a=1[v0][amain]" in g
     assert "anullsrc" in joined  # b has no audio
 
 
@@ -114,10 +114,24 @@ def test_no_music_keeps_plain_audio_path():
 def test_trimmed_clips_get_audio_fades():
     tl = Timeline([ClipPlan(1, 0.0, 10.0, "a", "3K", "c", None, trimmed=True, src_start=2.0)], 10.0)
     g = _graph(build_args(MAIN, tl, _assets(lower_thirds={}, punches={}), Options(), Path("o.mp4")))
-    assert "afade=t=in:d=0.03" in g and "[mv0][mf0]" in g
+    assert "afade=t=in:d=0.03" in g and "[mv0_0][ma0_0]" in g
 
 
 def test_output_is_60fps_even_from_120fps_sources():
     info = MediaInfo(1920, 1080, Fraction(120), 30.0, True)
     g = _graph(build_args([(Path("in.mp4"), info)], TL, _assets(), Options(), Path("o.mp4")))
     assert "fps=60," in g and "fps=120" not in g
+
+
+def test_slow_motion_pieces_are_retimed_with_tape_audio():
+    tl = Timeline(
+        [ClipPlan(1, 0.0, 12.0, "a", "3K", "c", None, src_start=3.0, src_len=10.0, slow=((4.0, 6.0),), speed=0.5)],
+        12.0,
+    )
+    args = build_args(MAIN, tl, _assets(lower_thirds={}, punches={}), Options(), Path("o.mp4"))
+    g, joined = _graph(args), " ".join(args)
+    assert "-ss 3 -t 3.7 -i in.mp4" in joined  # normal speed before the ease-in
+    assert "-ss 7 -t 2 -i in.mp4" in joined  # the full-slow window (3 + 4)
+    assert "setpts=(PTS-STARTPTS)/0.5,fps=60" in g
+    assert "asetrate=48000*0.5,aresample=48000,lowpass=f=3200" in g and "atempo" not in g
+    assert g.count("asetrate=") > 1 and "concat=n=11:v=1:a=1[v0][amain]" in g  # eased in and out in steps

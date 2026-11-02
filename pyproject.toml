@@ -15,6 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+beats = ["librosa>=0.10"]  # --snap-cuts
 
 [project.scripts]
 cotw = "cotw.cli:main"

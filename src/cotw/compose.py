@@ -11,13 +11,16 @@ from fractions import Fraction
 from pathlib import Path
 
 from cotw.graphics import H, STAT_TOTAL, W
-from cotw.plan import Timeline
+from cotw.plan import Timeline, clip_segments
 
 FADE = 0.5  # title/end card fade length, seconds
 LT_FADE = 0.3  # lower-third alpha fade in/out
 LT_SLIDE = 0.45  # lower-third slide-in time
 LT_SLIDE_PX = 400
 PUNCH_FADE_OUT = 0.25
+# Slow-motion sound: slowed like a tape (pitch drops with speed, so nothing is stretched or smeared the
+# way atempo does to gunfire), then low-passed for the muffled movie-slow-mo feel.
+SLOW_AUDIO = ",asetrate=48000*{speed},aresample=48000,lowpass=f=3200"
 CUT_FADE = 0.03  # audio fade at the edges of a trimmed clip
 
 
@@ -187,24 +190,31 @@ def build_args(
     def silence(seconds: float) -> int:
         return g.add_input("-f", "lavfi", "-t", _num(seconds), "-i", "anullsrc=r=48000:cl=stereo")
 
-    # Each clip is cut from its source video (in timeline order), normalised, then joined.
-    ma = {k: f"ma{k}" for k in range(len(timeline.clips))}
+    # Each clip is cut from its source video (in timeline order, slow-motion pieces at their own
+    # speed), normalised, then everything is joined.
+    pieces: list[str] = []
     for k, clip in enumerate(timeline.clips):
         path, mi = mains[clip.source]
-        seek = ["-ss", _num(clip.src_start), "-t", _num(clip.duration)]
-        idx = g.add_input(*seek, "-i", str(path))
-        g.chain(f"[{idx}:v]fps={fps},scale={size},setsar=1[mv{k}]")
-        if mi.has_audio:
-            g.chain(f"[{idx}:a:0]aresample=48000,aformat=channel_layouts=stereo[ma{k}]")
-        else:
-            sil = silence(clip.duration)
-            g.chain(f"[{sil}:a]anull[ma{k}]")
-        if clip.trimmed:  # tiny fades so the cuts don't click
-            g.chain(f"[ma{k}]afade=t=in:d={CUT_FADE},afade=t=out:st={_num(max(0.0, clip.duration - CUT_FADE))}:d={CUT_FADE}[mf{k}]")
-            ma[k] = f"mf{k}"
-    n = len(timeline.clips)
-    joined_main = "".join(f"[mv{k}][{ma[k]}]" for k in range(n))
-    g.chain(f"{joined_main}concat=n={n}:v=1:a=1[v0][amain]")
+        segs = clip_segments(clip)
+        for j, (off, length, speed) in enumerate(segs):
+            tag = f"{k}_{j}"
+            idx = g.add_input("-ss", _num(clip.src_start + off), "-t", _num(length), "-i", str(path))
+            slow = abs(speed - 1.0) > 1e-6
+            retime = f"setpts=(PTS-STARTPTS)/{_num(speed)}," if slow else ""
+            g.chain(f"[{idx}:v]{retime}fps={fps},scale={size},setsar=1[mv{tag}]")
+            shown = length / speed
+            if mi.has_audio:
+                audio = f"[{idx}:a:0]aresample=48000,aformat=channel_layouts=stereo" + (SLOW_AUDIO.format(speed=_num(speed)) if slow else "")
+            else:
+                audio = f"[{silence(shown)}:a]anull"
+            fades = []
+            if clip.trimmed and j == 0:  # tiny fades so the cuts don't click
+                fades.append(f"afade=t=in:d={CUT_FADE}")
+            if clip.trimmed and j == len(segs) - 1:
+                fades.append(f"afade=t=out:st={_num(max(0.0, shown - CUT_FADE))}:d={CUT_FADE}")
+            g.chain(audio + "".join("," + f for f in fades) + f"[ma{tag}]")
+            pieces.append(f"[mv{tag}][ma{tag}]")
+    g.chain(f"{''.join(pieces)}concat=n={len(pieces)}:v=1:a=1[v0][amain]")
     cur, step = "v0", 0
 
     def overlay(top: str, enable: tuple[float, float] | None, x: str = "0") -> None:

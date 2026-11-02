@@ -78,6 +78,10 @@ cotw files --episode 1 -o output/cotw-ep01.mp4
 | `--pick 3,1,5` / `--skip 2,4` | Use only these clips in this order / leave clips out |
 | `--kill-padding N` | Trim each clip to N seconds before its first kill and after its last (uses the report's `beat_targets`) |
 | `--music FILE` | Music bed: starts after the title card, plays once, ducked under the game audio (`--music-volume`, default 0.25; `--music-start` to move it) |
+| `--slowmo last\|special\|headshots\|all` | Slow motion around kills, eased in and out (off by default). `last` = each clip's final kill; `special`/`headshots` add those kills; `all` slows every kill. Needs 120 fps sources |
+| `--slowmo-clips auto\|all\|3,5` | Which clips get it (default `auto`: signature clips, i.e. clutch/ace/4K, best first, at most a third of the episode) |
+| `--slowmo-speed X` | Speed in the slowest part (default 0.5, from 120 fps footage that stays smooth at 60 fps) |
+| `--snap-cuts` | Move each cut onto the nearest beat of `--music` (`pip install -e '.[beats]'`) |
 | `--fps N` | Output frame rate (default 60; 120 fps sources are just headroom for slow motion) |
 | `--channel NAME` | Handle on the end card (default `@LANChampGG`) |
 | `--lower-third-scale X` | Lower-third size (default 0.65; 1.0 is the original, larger plate) |
@@ -110,6 +114,22 @@ cotw files --episode 1 --order score --kill-padding 2.5 --music "files/song.mp3"
 The track starts when the title card ends and fades in. If it is shorter than the episode it plays
 once and ends on its own (the end card carries on without it); if it is longer it is cut with a
 3 s fade-out. It is ducked automatically whenever the game audio is loud. Needs FFmpeg 4.4+.
+
+## Slow motion and beat-snapped cuts
+
+```bash
+cotw files --episode 1 --order score --kill-padding 2.5 --slowmo last --snap-cuts \
+     --music "files/song.mp3" -o output/cotw-ep01.mp4
+```
+
+Slow motion eases from full speed down to 0.5x just before a kill and back up after it, using the
+120 fps source so it stays smooth in a 60 fps video. The game audio in that stretch is slowed like a
+tape (the pitch drops) and low-passed, which avoids the smearing of time-stretching. Use
+`--slowmo-clips 3,5` to pick clips yourself (clip numbers as in the clip list from `--dry-run`).
+
+`--snap-cuts` lengthens or shortens the end of each clip so the cut lands on a beat, never cutting off
+a kill. It needs `librosa` (`pip install -e '.[beats]'`); beats are cached next to the track as
+`<track>.beats.json`.
 
 ## Player names and teams
 

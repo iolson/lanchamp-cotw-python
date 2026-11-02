@@ -1,6 +1,6 @@
 import pytest
 
-from cotw.plan import PlanError, build_timeline, describe_moment, load_report, merge_timelines, load_names, PlayerInfo, arrange, parse_numbers
+from cotw.plan import PlanError, build_timeline, describe_moment, load_report, merge_timelines, load_names, PlayerInfo, arrange, parse_numbers, snap_cuts, clip_segments, apply_slowmo
 
 
 def _report():
@@ -195,3 +195,70 @@ def test_kill_padding_trims_to_the_kills_and_keeps_source_positions():
     assert tl.duration == 26.0
     whole = build_timeline(report)
     assert whole.duration == 40.0 and not whole.clips[0].trimmed
+
+
+def _kill_report():
+    return {
+        "map": "de_nuke",
+        "sequences": [{"number": 1, "round": 3, "duration_seconds": 20.0, "clip_duration_seconds": 20.0,
+                       "video_start_seconds": 0.0, "moments": []}],
+        "beat_targets": [
+            {"sequence": 1, "clip_time_seconds": 4.0, "headshot": True, "special": False},
+            {"sequence": 1, "clip_time_seconds": 10.0, "headshot": False, "special": False},
+            {"sequence": 1, "clip_time_seconds": 10.2, "headshot": False, "special": False},
+        ],
+    }
+
+
+def test_slowmo_last_slows_only_the_final_kill_with_ramps_in_and_out():
+    tl = build_timeline(_kill_report(), kill_padding=2.5)
+    c = apply_slowmo(tl, "last", select="all").clips[0]
+    # last kill at 10.2s is 8.7s into the trimmed clip: full slow-mo from 0.3s before to 0.45s after
+    assert len(c.slow) == 1 and abs(c.slow[0][0] - 8.4) < 1e-6 and abs(c.slow[0][1] - 9.15) < 1e-6
+    segs = clip_segments(c)
+    speeds = [round(sp, 2) for _, _, sp in segs]
+    assert speeds[0] == 1.0 and speeds[-1] == 1.0 and min(speeds) == 0.5
+    down, up = speeds[: speeds.index(0.5)], speeds[speeds.index(0.5) + 1 :]
+    assert down[1:] == sorted(down[1:], reverse=True) and up[:-1] == sorted(up[:-1])  # smooth in and out
+    assert abs(sum(l / sp for _, l, sp in segs) - c.duration) < 1e-6 and c.duration > c.src_len
+    assert sum(l for _, l, _ in segs) == c.src_len or abs(sum(l for _, l, _ in segs) - c.src_len) < 1e-6
+
+
+def test_slowmo_headshots_adds_headshot_windows_and_none_adds_nothing():
+    tl = build_timeline(_kill_report(), kill_padding=2.5)
+    assert len(apply_slowmo(tl, "headshots", select="all").clips[0].slow) == 2
+    assert apply_slowmo(tl, "none", select="all").clips[0].slow == ()
+
+
+def test_slowmo_clip_selection_is_selective():
+    from cotw.plan import ClipPlan, Punch, Timeline, select_slowmo_clips
+    clips = [ClipPlan(n, 0.0, 10.0, "p", "s", "c", Punch("", "4K", "") if pun else None, score=sc)
+             for n, pun, sc in [(1, True, 5), (2, False, 9), (3, True, 8), (4, True, 7), (5, False, 1), (6, False, 2)]]
+    tl = Timeline(clips, 60.0)
+    assert select_slowmo_clips(tl) == [3, 4]  # signature clips only, best first, at most a third (2 of 6)
+    assert select_slowmo_clips(tl, [5, 1]) == [5, 1] and select_slowmo_clips(tl, "all") == [1, 2, 3, 4, 5, 6]
+    try:
+        select_slowmo_clips(tl, [9])
+    except PlanError:
+        pass
+    else:
+        raise AssertionError
+
+
+def test_snap_cuts_moves_clip_ends_onto_beats_without_cutting_kills():
+    tl = build_timeline(_kill_report(), kill_padding=2.5)  # 11.2s clip, last kill 8.7s into it
+    beats = [i * 0.6 for i in range(100)]
+    snapped = snap_cuts(tl, beats, offset=5.0, music_start=5.0)
+    end = 5.0 + snapped.clips[0].duration
+    assert min(abs(end - b - 5.0) for b in beats) < 1e-6
+    assert snapped.clips[0].src_len >= tl.clips[0].min_src - 1e-9
+    assert abs(snapped.clips[0].duration - tl.clips[0].duration) <= 0.3 + 1e-9
+
+
+def test_snap_cuts_keeps_slow_motion_intact():
+    tl = apply_slowmo(build_timeline(_kill_report(), kill_padding=2.5), "last", select="all")
+    beats = [i * 0.6 for i in range(100)]
+    snapped = snap_cuts(tl, beats, offset=5.0, music_start=5.0).clips[0]
+    assert snapped.slow == tl.clips[0].slow
+    assert snapped.src_len >= snapped.slow[-1][1] + 0.4 - 1e-9  # the ramp out still fits
+    assert min(abs(5.0 + snapped.duration - b - 5.0) for b in beats) < 1e-6
