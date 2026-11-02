@@ -1,6 +1,6 @@
 import pytest
 
-from cotw.plan import PlanError, build_timeline, describe_moment, load_report, merge_timelines, load_names, PlayerInfo
+from cotw.plan import PlanError, build_timeline, describe_moment, load_report, merge_timelines, load_names, PlayerInfo, arrange, parse_numbers
 
 
 def _report():
@@ -119,3 +119,42 @@ def test_load_names_rejects_bad_shapes(tmp_path, bad):
     p.write_text(bad)
     with pytest.raises(PlanError):
         load_names(p)
+
+
+def _tl():
+    from cotw.plan import ClipPlan, Timeline
+    clips = [ClipPlan(n, 0.0, d, p, "x", "c", None, score=sc) for n, d, p, sc in
+             [(1, 10, "a", 30), (2, 20, "b", 10), (3, 5, "a", 20), (4, 5, "c", 40)]]
+    return Timeline(clips, 40.0)
+
+
+def test_arrange_by_score_ascending_and_reversed():
+    assert [c.number for c in arrange(_tl(), order="score").clips] == [2, 3, 1, 4]
+    assert [c.number for c in arrange(_tl(), order="score", reverse=True).clips] == [4, 1, 3, 2]
+
+
+def test_arrange_recomputes_starts():
+    tl = arrange(_tl(), order="score")
+    assert [c.start for c in tl.clips] == [0, 20, 25, 35] and tl.duration == 40
+
+
+def test_arrange_pick_and_skip():
+    assert [c.number for c in arrange(_tl(), pick=[4, 1]).clips] == [4, 1]
+    assert [c.number for c in arrange(_tl(), skip=[2]).clips] == [1, 3, 4]
+    for bad in (dict(pick=[9]), dict(pick=[1, 1]), dict(skip=[1, 2, 3, 4])):
+        try:
+            arrange(_tl(), **bad)
+        except PlanError:
+            continue
+        raise AssertionError(bad)
+
+
+def test_shuffle_is_seeded_and_avoids_same_player_neighbours():
+    a = [c.number for c in arrange(_tl(), order="shuffle", seed=7).clips]
+    assert a == [c.number for c in arrange(_tl(), order="shuffle", seed=7).clips]
+    players = [c.player for c in arrange(_tl(), order="shuffle", seed=7).clips]
+    assert all(x != y for x, y in zip(players, players[1:]))
+
+
+def test_parse_numbers():
+    assert parse_numbers("3, 1,5") == [3, 1, 5]

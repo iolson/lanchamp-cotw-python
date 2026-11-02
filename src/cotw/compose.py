@@ -134,7 +134,7 @@ def build_args(
     size = f"{info.width}:{info.height}"
     needs_scale = (info.width, info.height) != (W, H)
     rgba = f"format=rgba,scale={size}" if needs_scale else "format=rgba"
-    main_dur = sum(i.duration for _, i in mains)
+    main_dur = timeline.duration
 
     def loop_png(path: Path, seconds: float) -> int:
         return g.add_input("-loop", "1", "-framerate", fps, "-t", _num(seconds), "-i", str(path))
@@ -142,17 +142,20 @@ def build_args(
     def silence(seconds: float) -> int:
         return g.add_input("-f", "lavfi", "-t", _num(seconds), "-i", "anullsrc=r=48000:cl=stereo")
 
-    # Every highlight video is normalised, then joined into one main stream.
-    for k, (path, mi) in enumerate(mains):
-        idx = g.add_input("-i", str(path))
+    # Each clip is cut from its source video (in timeline order), normalised, then joined.
+    for k, clip in enumerate(timeline.clips):
+        path, mi = mains[clip.source]
+        seek = ["-ss", _num(clip.src_start), "-t", _num(clip.duration)]
+        idx = g.add_input(*seek, "-i", str(path))
         g.chain(f"[{idx}:v]fps={fps},scale={size},setsar=1[mv{k}]")
         if mi.has_audio:
             g.chain(f"[{idx}:a:0]aresample=48000,aformat=channel_layouts=stereo[ma{k}]")
         else:
-            sil = silence(mi.duration)
+            sil = silence(clip.duration)
             g.chain(f"[{sil}:a]anull[ma{k}]")
-    joined_main = "".join(f"[mv{k}][ma{k}]" for k in range(len(mains)))
-    g.chain(f"{joined_main}concat=n={len(mains)}:v=1:a=1[v0][amain]")
+    n = len(timeline.clips)
+    joined_main = "".join(f"[mv{k}][ma{k}]" for k in range(n))
+    g.chain(f"{joined_main}concat=n={n}:v=1:a=1[v0][amain]")
     cur, step = "v0", 0
 
     def overlay(top: str, enable: tuple[float, float] | None, x: str = "0") -> None:

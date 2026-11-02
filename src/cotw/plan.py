@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -31,6 +32,9 @@ class ClipPlan:
     context: str  # e.g. "Mirage · Round 12"
     punch: Punch | None
     team: str = ""  # from names.json; empty means use the CLI default
+    score: float = 0.0  # best moment's score, used by --order score
+    source: int = 0  # index of the highlights video this clip is cut from
+    src_start: float = 0.0  # where the clip starts inside that video
 
 
 @dataclass(frozen=True)
@@ -157,7 +161,10 @@ def build_timeline(
         cam = (seq.get("cameras") or [{}])[0]
         player = best.get("player") or cam.get("name", "")
         info = _lookup(player, str(best.get("steamid") or cam.get("steamid") or ""), names or {})
-        clips.append(ClipPlan(seq["number"], t, dur, info.name or player, stat, context, punch, info.team or ""))
+        clips.append(
+            ClipPlan(seq["number"], t, dur, info.name or player, stat, context, punch, info.team or "",
+                     score=float(best.get("score", 0)), src_start=t)
+        )
         t += dur
     return Timeline(clips, t)
 
@@ -166,8 +173,74 @@ def merge_timelines(timelines: list[Timeline]) -> Timeline:
     """Chain timelines end to end, renumbering clips 1..N so numbers stay unique across videos."""
     clips: list[ClipPlan] = []
     offset = 0.0
-    for tl in timelines:
+    for source, tl in enumerate(timelines):
         for clip in tl.clips:
-            clips.append(replace(clip, number=len(clips) + 1, start=clip.start + offset))
+            clips.append(replace(clip, number=len(clips) + 1, start=clip.start + offset, source=source))
         offset += tl.duration
     return Timeline(clips, offset)
+
+
+ORDERS = ("chronological", "score", "shuffle")
+
+
+def parse_numbers(text: str) -> list[int]:
+    """'3, 1,5' -> [3, 1, 5]."""
+    try:
+        return [int(p) for p in text.replace(" ", "").split(",") if p]
+    except ValueError as exc:
+        raise PlanError(f"expected a comma-separated list of clip numbers, got {text!r}") from exc
+
+
+def _adjacent_repeats(clips: list[ClipPlan]) -> int:
+    return sum(a.player == b.player for a, b in zip(clips, clips[1:]))
+
+
+def arrange(
+    timeline: Timeline,
+    *,
+    order: str = "chronological",
+    reverse: bool = False,
+    seed: int | None = None,
+    pick: list[int] | None = None,
+    skip: list[int] | None = None,
+) -> Timeline:
+    """Choose and order the clips; start times are recomputed for the new order.
+
+    `pick` keeps only those clip numbers, in the order given (it overrides `order`); `skip` drops
+    clips. `score` runs lowest to highest; `shuffle` avoids back-to-back clips of one player when it can.
+    """
+    by_number = {c.number: c for c in timeline.clips}
+    for n in [*(pick or []), *(skip or [])]:
+        if n not in by_number:
+            raise PlanError(f"no clip #{n} (clips are numbered 1..{len(by_number)})")
+    clips = list(timeline.clips)
+    if pick:
+        if len(set(pick)) != len(pick):
+            raise PlanError("--pick lists a clip more than once")
+        clips = [by_number[n] for n in pick]
+    else:
+        clips = [c for c in clips if c.number not in set(skip or [])]
+        if order == "score":
+            clips.sort(key=lambda c: c.score)  # stable: ties keep recording order
+        elif order == "shuffle":
+            rng = random.Random(seed)
+            best: list[ClipPlan] | None = None
+            for _ in range(200):
+                trial = clips[:]
+                rng.shuffle(trial)
+                if best is None or _adjacent_repeats(trial) < _adjacent_repeats(best):
+                    best = trial
+                if _adjacent_repeats(best) == 0:
+                    break
+            clips = best or clips
+        elif order != "chronological":
+            raise PlanError(f"unknown order {order!r}")
+        if reverse:
+            clips.reverse()
+    if not clips:
+        raise PlanError("no clips left after --pick/--skip")
+    out, t = [], 0.0
+    for c in clips:
+        out.append(replace(c, start=t))
+        t += c.duration
+    return Timeline(out, t)

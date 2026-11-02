@@ -73,8 +73,18 @@ def test_nvenc_encoder_args():
     assert args[args.index("-cq") + 1] == "20"
 
 
-def test_several_videos_are_concatenated_into_the_main_stream():
-    two = [(Path("a.mp4"), INFO), (Path("b.mp4"), MediaInfo(1920, 1080, Fraction(60), 10.0, False))]
-    g = _graph(build_args(two, TL, _assets(), Options(), Path("o.mp4")))
+def test_clips_are_cut_from_their_source_video_in_timeline_order():
+    b_info = MediaInfo(1920, 1080, Fraction(60), 10.0, False)
+    two = [(Path("a.mp4"), INFO), (Path("b.mp4"), b_info)]
+    tl = Timeline(
+        [ClipPlan(2, 0.0, 4.0, "b", "3K", "ctx", None, source=1, src_start=1.5),
+         ClipPlan(1, 4.0, 10.0, "a", "ACE", "ctx", None, source=0, src_start=0.0)],
+        14.0,
+    )
+    args = build_args(two, tl, _assets(lower_thirds={}, punches={}), Options(), Path("o.mp4"))
+    g = _graph(args)
+    joined = " ".join(args)
+    assert "-ss 1.5 -t 4 -i b.mp4" in joined and "-ss 0 -t 10 -i a.mp4" in joined
+    assert joined.index("b.mp4") < joined.index("a.mp4")
     assert "[mv0][ma0][mv1][ma1]concat=n=2:v=1:a=1[v0][amain]" in g
-    assert "anullsrc" in " ".join(build_args(two, TL, _assets(), Options(), Path("o.mp4")))  # b has no audio
+    assert "anullsrc" in joined  # b has no audio

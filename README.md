@@ -72,12 +72,29 @@ cotw files --episode 1 -o output/cotw-ep01.mp4
 | `--report PATH` | JSON elsewhere than `<video>.json` |
 | `--clips-dir DIR` | `clip_NN.mp4` files from the highlights work dir; exact clip lengths replace the JSON's 0.1 s-rounded ones |
 | `--end-card append\|overlay\|off` | `append` (default) adds the 15 s card after the video; `overlay` covers the video's last 15 s |
+| `--order chronological\|score\|shuffle` | Clip order across all videos (default `chronological`) |
+| `--reverse` | Flip the order, e.g. `--order score --reverse` for best first |
+| `--seed N` | Repeat a `shuffle` cut |
+| `--pick 3,1,5` / `--skip 2,4` | Use only these clips in this order / leave clips out |
 | `--lower-third-seconds N` | How long each lower third stays up (default 7) |
 | `--title-style center\|cinematic` | Title card style |
 | `--no-title / --no-bug / --no-lower-thirds / --no-punch` | Drop individual graphics |
 | `--encoder h264_nvenc` | NVIDIA GPU encode, Windows/Linux only (default `libx264`, CRF `--quality 18`) |
 | `--graphics-only DIR` | Render the PNGs/frames to `DIR` and stop, to eyeball the look |
 | `--dry-run` | Print the timeline and the FFmpeg command only |
+
+## Ordering clips
+
+By default clips play in recording order. `--order score` builds up from the lowest-scoring clip
+to the best; `--order shuffle` randomises (seeded with `--seed`, and avoids back-to-back clips
+from one player when it can). Run once with `--dry-run` to see the numbered clip list, then use
+`--pick 4,2,1` to choose exactly which clips play and in what order, or `--skip 3` to drop some.
+`--pick` overrides `--order`.
+
+```bash
+cotw files --episode 1 --order score -o output/cotw-ep01.mp4
+cotw files --episode 1 --pick 4,2,1 -o output/cotw-ep01.mp4
+```
 
 ## Player names and teams
 

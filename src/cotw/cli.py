@@ -21,6 +21,7 @@ from cotw.compose import (
     run_ffmpeg,
 )
 from cotw.plan import PlanError, Timeline, build_timeline, load_names, load_report, merge_timelines
+from cotw.plan import ORDERS, arrange, parse_numbers
 
 
 def render_assets(
@@ -93,6 +94,12 @@ def _save(img, path: Path) -> Path:
 @click.option("--end-seconds", type=float, default=15.0, show_default=True)
 @click.option("--end-card", "end_mode", type=click.Choice(["append", "overlay", "off"]), default="append",
               show_default=True, help="append: add the card after the video; overlay: cover its last seconds.")
+@click.option("--order", type=click.Choice(ORDERS), default="chronological", show_default=True,
+              help="Clip order: recording order, lowest to highest score, or random.")
+@click.option("--reverse", is_flag=True, help="Flip the order (e.g. --order score --reverse for best first).")
+@click.option("--seed", type=int, help="Seed for --order shuffle, to repeat a cut.")
+@click.option("--pick", help="Only these clip numbers, in this order, e.g. 3,1,5 (numbers from the clip list).")
+@click.option("--skip", help="Leave these clip numbers out, e.g. 2,4.")
 @click.option("--no-title", is_flag=True, help="Skip the title card.")
 @click.option("--no-bug", is_flag=True, help="Skip the corner bug.")
 @click.option("--no-lower-thirds", is_flag=True)
@@ -107,6 +114,7 @@ def _save(img, path: Path) -> Path:
 @click.option("--dry-run", is_flag=True, help="Print the timeline and FFmpeg command without encoding.")
 def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None, episode: int, week: str, featuring: str,
          league: str, channel: str, next_up: str, team: str, names_path: Path | None, title_style: str, title_seconds: float,
+         order: str, reverse: bool, seed: int | None, pick: str | None, skip: str | None,
          end_seconds: float, lower_third_seconds: float, end_mode: str, no_title: bool, no_bug: bool, no_lower_thirds: bool, no_punch: bool,
          clips_dir: Path | None, encoder: str, quality: int, ffmpeg_path: Path | None,
          graphics_only: Path | None, dry_run: bool) -> None:
@@ -153,6 +161,14 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
             mains.append((v, info))
             timelines.append(tl)
         timeline = merge_timelines(timelines)
+        if order != "chronological" or reverse or pick or skip:
+            click.echo("Clips as recorded:")
+            for c in timeline.clips:
+                click.echo(f"  #{c.number:<2} {c.player} · {c.stat} (score {c.score:g})")
+            timeline = arrange(timeline, order=order, reverse=reverse, seed=seed,
+                               pick=parse_numbers(pick) if pick else None,
+                               skip=parse_numbers(skip) if skip else None)
+            click.echo("Final order:")
     except (FfmpegError, PlanError) as exc:
         raise click.ClickException(str(exc)) from exc
 
