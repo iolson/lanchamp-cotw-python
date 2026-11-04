@@ -23,8 +23,8 @@ from cotw.compose import (
     run_ffmpeg,
 )
 from cotw.plan import PlanError, Timeline, build_timeline, load_names, load_report, merge_timelines
-from cotw.ai import AiError, load_plan, suggest_plan
-from cotw.beats import BeatError, detect_beats
+from cotw.ai import AiError, load_plan, suggest_music, suggest_plan
+from cotw.beats import BeatError, analyze_track, detect_beats
 from cotw.plan import ORDERS, SLOWMO_MODES, apply_slowmo, arrange, parse_numbers, snap_cuts
 
 
@@ -100,6 +100,24 @@ def _edit_plan(timeline: Timeline, ai_url: str | None, model: str | None, plan_p
     return plan
 
 
+def _pick_music(timeline: Timeline, folder: Path, ai_url: str | None, model: str | None, think: bool) -> Path:
+    tracks = sorted(p for p in folder.iterdir() if p.suffix.lower() in (".mp3", ".wav", ".m4a", ".flac", ".ogg"))
+    if not tracks:
+        raise click.UsageError(f"no audio files in {folder}")
+    try:
+        facts = [analyze_track(p) for p in tracks]
+        if ai_url:
+            click.echo(f"Asking the model to pick one of {len(tracks)} tracks ...")
+            name, why = suggest_music(timeline, facts, ai_url, model, think=think)
+            click.echo(f"Music: {name}\n  why: {why}")
+        else:
+            name = min(facts, key=lambda f: abs(f["seconds"] - timeline.duration))["file"]
+            click.echo(f"Music: {name} (closest in length to the video)")
+    except (AiError, BeatError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    return folder / name
+
+
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.argument("videos", nargs=-1, required=True, type=click.Path(exists=True, path_type=Path))
 @click.option("--report", "report_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
@@ -143,6 +161,9 @@ def _edit_plan(timeline: Timeline, ai_url: str | None, model: str | None, plan_p
               help="Move each cut onto the nearest beat of --music (needs librosa).")
 @click.option("--music", type=click.Path(exists=True, dir_okay=False, path_type=Path),
               help="Music track (MP3/WAV), played once from after the title card (faded out if longer than the episode) and ducked under the game audio.")
+@click.option("--music-dir", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              help="Folder of tracks to choose from (with --ai the model picks the best fit; "
+                   "otherwise the one closest in length to the video).")
 @click.option("--music-volume", type=float, default=Options.music_volume, show_default=True,
               help="Music level before ducking (1.0 = the track's own volume).")
 @click.option("--music-start", type=float,
@@ -171,7 +192,7 @@ def _edit_plan(timeline: Timeline, ai_url: str | None, model: str | None, plan_p
 def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None, episode: int, week: str, featuring: str,
          league: str, channel: str, next_up: str, team: str, names_path: Path | None, title_style: str, title_seconds: float,
          ai_url: str | None, ai_model: str | None, ai_fast: bool, plan_path: Path | None,
-         kill_padding: float | None, slowmo: str, slowmo_clips: str, slowmo_speed: float, snap_cuts_on: bool, music: Path | None, music_volume: float, music_start: float | None,
+         kill_padding: float | None, slowmo: str, slowmo_clips: str, slowmo_speed: float, snap_cuts_on: bool, music: Path | None, music_dir: Path | None, music_volume: float, music_start: float | None,
          order: str, reverse: bool, seed: int | None, pick: str | None, skip: str | None,
          end_seconds: float, lower_third_seconds: float, lower_third_scale: float, end_mode: str, no_title: bool, no_bug: bool, no_lower_thirds: bool, no_punch: bool,
          clips_dir: Path | None, encoder: str, fps: int, quality: int, ffmpeg_path: Path | None,
@@ -240,6 +261,8 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
                                pick=parse_numbers(pick) if pick else None,
                                skip=parse_numbers(skip) if skip else None)
             click.echo("Final order:")
+        if music_dir and not music:
+            music = _pick_music(timeline, music_dir, ai_url, ai_model, not ai_fast)
         if slowmo != "none":
             sel = slowmo_clips if slowmo_clips in ("auto", "all") else parse_numbers(slowmo_clips)
             timeline = apply_slowmo(timeline, slowmo, slowmo_speed, sel)

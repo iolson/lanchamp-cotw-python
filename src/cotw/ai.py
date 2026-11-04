@@ -160,3 +160,50 @@ def load_plan(path: Path, numbers: list[int]) -> EditPlan:
     except (OSError, ValueError) as exc:
         raise AiError(f"cannot read plan {path}: {exc}") from exc
     return normalize_plan(raw, numbers)
+
+
+MUSIC_SCHEMA = {
+    "type": "object",
+    "properties": {"file": {"type": "string"}, "reasons": {"type": "string"}},
+    "required": ["file", "reasons"],
+}
+
+
+def suggest_music(
+    timeline: Timeline, tracks: list[dict], base_url: str, model: str | None = None,
+    timeout: float = 400.0, think: bool = True,
+) -> tuple[str, str]:
+    """Pick the best-fitting track from `tracks` (facts from beats.analyze_track); returns (file, reasons)."""
+    base = base_url.rstrip("/")
+    model = model or _first_model(base, timeout)
+    episode = {
+        "video_seconds": round(timeline.duration),
+        "clips": [clip_brief(c) | {"kills": len(c.kills)} for c in timeline.clips],
+    }
+    prompt = (
+        "Choose the music track for this Counter-Strike highlights video. Fit matters more than taste: the "
+        "track should be about as long as the video or longer (a shorter one leaves silence), its energy "
+        "should build toward the loudest part near the end where the biggest clips play, and a higher tempo "
+        "suits fast multi-kill clips. 'energy_per_10s' is loudness per 10 seconds from 0 to 9 and "
+        "'biggest_drop_at' is when it gets suddenly louder (null if there is no clear drop). Answer with the "
+        "exact 'file' of one track and short reasons.\n\n"
+        f"Video:\n{json.dumps(episode)}\n\nTracks:\n{json.dumps(tracks, indent=1)}"
+    )
+    reply = _post(
+        base + "/chat/completions",
+        {
+            "model": model, "temperature": 0.2, "max_tokens": 16000,
+            "chat_template_kwargs": {"enable_thinking": think},
+            "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
+            "response_format": {"type": "json_schema", "json_schema": {"name": "music_pick", "schema": MUSIC_SCHEMA}},
+        },
+        timeout,
+    )
+    try:
+        raw = json.loads(reply["choices"][0]["message"]["content"])
+        file, reasons = str(raw["file"]), str(raw.get("reasons") or "")
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise AiError(f"the model did not return a usable music pick: {reply!r:.200}") from exc
+    if file not in {t["file"] for t in tracks}:
+        raise AiError(f"the model picked {file!r}, which is not one of the candidate tracks")
+    return file, reasons

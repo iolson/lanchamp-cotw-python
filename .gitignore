@@ -7,3 +7,4 @@ files/
 .DS_Store
 names.json
 *.beats.json
+*.analysis.json

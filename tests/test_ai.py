@@ -46,3 +46,15 @@ def test_unusable_reply_is_an_error(monkeypatch):
     except ai.AiError:
         return
     raise AssertionError
+
+
+def test_suggest_music_validates_the_pick(monkeypatch):
+    tracks = [{"file": "a.mp3", "seconds": 120}, {"file": "b.mp3", "seconds": 200}]
+    monkeypatch.setattr(ai, "_post", lambda *a, **k: {"choices": [{"message": {"content": json.dumps({"file": "b.mp3", "reasons": "longer"})}}]})
+    assert ai.suggest_music(TL, tracks, "http://llm/v1", model="m") == ("b.mp3", "longer")
+    monkeypatch.setattr(ai, "_post", lambda *a, **k: {"choices": [{"message": {"content": json.dumps({"file": "zzz.mp3", "reasons": ""})}}]})
+    try:
+        ai.suggest_music(TL, tracks, "http://llm/v1", model="m")
+    except ai.AiError:
+        return
+    raise AssertionError
