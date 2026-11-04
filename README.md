@@ -165,8 +165,17 @@ cotw-frag files --player fuzzyhat --music "files/song.mp3"      # only that play
   (`--order score`) and the weakest are dropped first when the track is too short.
 - **Eased slow motion** on the hero kill of each clip's final burst when the clip has 3+ kills
   (`--slowmo auto|all|none`, tape-style audio as above).
-- **Effects** on kills: zoom punch, plus screen shake, a flash and a colour grade on hero kills
-  (`--no-effects` to skip).
+- **Effects** on kills: zoom punch, plus screen shake and a flash on hero kills (`--no-effects` to skip).
+- **Transitions** at the cuts (`--transitions auto|none|flash|ghost|whip`): a white flash, a fading
+  ghost echo of the previous shot, or a horizontal whip blur. `auto` mixes them, leaves about a third
+  of the cuts clean, and flashes into the finale of big (4+ kill) clips.
+- **Optional looks**, both off by default: `--grade vivid|warm` (punchy saturation / warm tint) and
+  `--letterbox` (cinematic bars, `--letterbox-ratio 2.35`).
+- **Looser sync** (`--sync loose`, the default): cuts may also land on half beats while hero kills
+  always land on a beat; `--sync tight` keeps everything on beats. **Pacing** (`--pace auto`): longer
+  shots where the music is quiet and quick cuts where it is loud; `--pace flat` for even pacing.
+- **Several songs**: repeat `--music`; the tracks play in order and overlap by a second, and cuts
+  keep following the beats across the change.
 - There is no title card or kill counter: the edit goes straight into the clips.
 - The output file name is `<name> - <track>.mp4`; the track comes from the file's tags or an
   `Artist - Title.mp3` file name (`--name` / `--track-name` override). The game audio is mixed under the music (`--game-volume`, `--music-volume`).

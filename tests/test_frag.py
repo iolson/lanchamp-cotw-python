@@ -42,6 +42,66 @@ def test_weakest_bursts_are_dropped_when_the_music_is_too_short():
     assert len(tight) < len(full) and all(s.burst.score == 9.0 for s in tight[-1:])
 
 
+def _track(start=0.0, secs=100.0, energy=()):
+    beats = tuple(start + 0.28 + i * 0.65 for i in range(int(secs / 0.65) - 1))
+    return frag.Track(Path("t.mp3"), secs, start, beats, energy)
+
+
+def _place(bursts, tracks, loose, slowmo="none", factor=None):
+    grid, flags = frag.build_grid(tracks, loose)
+    return frag.place(bursts, grid, 100.0, slowmo, 0.5, flags, factor)
+
+
+def test_loose_grid_adds_half_beats_but_only_beats_can_take_the_hero_kill():
+    grid, flags = frag.build_grid([_track()], loose=True)
+    tight, tflags = frag.build_grid([_track()], loose=False)
+    assert len(grid) > 1.8 * len(tight) and all(tflags) and not all(flags)
+    segs = frag.place(frag.bursts_from([_clip()]), grid, 100.0, "none", 0.5, flags)
+    for s in segs:
+        hero_out = s.start + (s.burst.hero - s.src_start)
+        assert any(abs(hero_out - t) < 1e-6 and f for t, f in zip(grid, flags))
+
+
+def test_quiet_music_gets_longer_shots_than_loud_music():
+    loud, quiet = _track(energy=(9,) * 10), _track(energy=(1,) * 10)
+    bursts = frag.bursts_from([_clip()])
+    a, b = (_place(bursts, [tr], False, factor=frag.pace_factor([tr], "auto"))[0] for tr in (loud, quiet))
+    assert (b.end - b.start) > (a.end - a.start)
+
+
+def test_second_track_starts_before_the_first_ends():
+    a, b = _track(secs=60.0), _track(start=60.0 - frag.XFADE, secs=60.0)
+    grid, _ = frag.build_grid([a, b], loose=False)
+    assert grid == sorted(grid) and grid[-1] > 110
+
+
+def test_transition_plan_is_seeded_and_flashes_into_finales():
+    segs = _place(frag.bursts_from([_clip(1), _clip(2)]), [_track()], True)
+    assert frag.plan_transitions(segs, "none", 1) == []
+    assert all(k == "ghost" for _, k in frag.plan_transitions(segs, "ghost", 1))
+    assert frag.plan_transitions(segs, "auto", 3) == frag.plan_transitions(segs, "auto", 3)
+    big = [(5.0, False, False), (6.0, True, False), (20.0, True, False), (30.0, True, False)]
+    segs = _place(frag.bursts_from([_clip(1), _clip(2, kills=tuple(big))]), [_track()], True)
+    flashes = [t for t, k in frag.plan_transitions(segs, "auto", 3) if k == "flash"]
+    assert any(s.start in flashes for s in segs[1:] if s.burst.finale and s.burst.total >= 4)
+
+
+def test_build_args_has_the_optional_looks_only_when_asked():
+    from fractions import Fraction
+    from cotw.compose import MediaInfo
+    mains = [(Path("a.mp4"), MediaInfo(1920, 1080, Fraction(120), 100.0, True))]
+    segs = _place(frag.bursts_from([_clip(1), _clip(2)]), [_track()], True)
+    def g(look):
+        args = frag.build_args(mains, segs, [_track()], look, Path("o.mp4"))
+        return args[args.index("-filter_complex") + 1]
+
+    plain = g(frag.Look())
+    assert "drawbox" not in plain and "colorbalance" not in plain
+    fancy = g(frag.Look(letterbox=2.35, grade="vivid", transitions="ghost"))
+    assert "drawbox=x=0:y=0:w=iw:h=131" in fancy and "colorbalance" in fancy and "blend=all_expr" in fancy
+    assert "gblur" in g(frag.Look(transitions="whip")) and "gblur" not in plain
+
+
 def test_effect_expressions_cannot_overflow_for_late_kills():
     z, br, sx, sy = frag._punch_exprs([(120.0, True, 3, 3)])
     assert "max(0,t-120)" in br and "exp(-16*max(0,t-120))" in br and "exp(16" not in br
