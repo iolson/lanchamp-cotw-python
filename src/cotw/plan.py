@@ -42,6 +42,7 @@ class ClipPlan:
     slow: tuple[tuple[float, float], ...] = ()  # slow-motion windows, in source seconds from src_start
     speed: float = 0.5  # playback speed inside the slow windows
     kills: tuple[tuple[float, bool, bool], ...] = ()  # (seconds after src_start, headshot, special)
+    detail: str = ""  # e.g. "4K (m4a1)"; context for people / the LLM, not shown on screen
 
 
 SLOW_BEFORE, SLOW_AFTER = 0.30, 0.45  # full slow motion runs from just before a kill to just after it
@@ -282,7 +283,8 @@ def build_timeline(
             ClipPlan(seq["number"], out, dur, info.name or player, stat, context, punch, info.team or "",
                      score=float(best.get("score", 0)), src_start=t + lead, trimmed=trimmed,
                      src_len=src_len, src_max=src_max, min_src=min_src,
-                     kills=tuple((k["t"] - lead, k["headshot"], k["special"]) for k in kl or []))
+                     kills=tuple((k["t"] - lead, k["headshot"], k["special"]) for k in kl or []),
+                     detail=str(best.get("description") or ""))
         )
         t += seq_dur
         out += dur

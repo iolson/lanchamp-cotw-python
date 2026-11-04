@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,7 @@ from cotw.compose import (
     run_ffmpeg,
 )
 from cotw.plan import PlanError, Timeline, build_timeline, load_names, load_report, merge_timelines
+from cotw.ai import AiError, load_plan, suggest_plan
 from cotw.beats import BeatError, detect_beats
 from cotw.plan import ORDERS, SLOWMO_MODES, apply_slowmo, arrange, parse_numbers, snap_cuts
 
@@ -75,6 +77,29 @@ def _save(img, path: Path) -> Path:
     return path
 
 
+def _edit_plan(timeline: Timeline, ai_url: str | None, model: str | None, plan_path: Path | None, think: bool = True):
+    numbers = [c.number for c in timeline.clips]
+    try:
+        if plan_path and plan_path.is_file():
+            plan = load_plan(plan_path, numbers)
+            click.echo(f"Edit plan loaded from {plan_path}")
+        else:
+            click.echo(f"Asking the model at {ai_url} for an edit plan ...")
+            plan = suggest_plan(timeline, ai_url, model, think=think)
+            if plan_path:
+                plan_path.write_text(json.dumps(plan.to_json(), indent=2), encoding="utf-8")
+                click.echo(f"Edit plan saved to {plan_path}")
+    except AiError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"  order: {' '.join(f'#{n}' for n in plan.order)}")
+    click.echo(f"  slow motion: {' '.join(f'#{n}' for n in plan.slowmo) or 'none'}")
+    if plan.reasons:
+        click.echo(f"  why: {plan.reasons}")
+    for note in plan.notes:
+        click.echo(f"  note: {note}", err=True)
+    return plan
+
+
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.argument("videos", nargs=-1, required=True, type=click.Path(exists=True, path_type=Path))
 @click.option("--report", "report_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
@@ -122,6 +147,13 @@ def _save(img, path: Path) -> Path:
               help="Music level before ducking (1.0 = the track's own volume).")
 @click.option("--music-start", type=float,
               help="Seconds into the episode when the music starts (default: right after the title card).")
+@click.option("--ai", "ai_url", envvar="COTW_AI_URL", metavar="URL",
+              help="OpenAI-compatible LLM (e.g. http://host:8000/v1) that suggests clip order and slow-motion clips.")
+@click.option("--ai-model", help="Model name for --ai (default: the server's first model).")
+@click.option("--ai-fast", is_flag=True, help="Skip the model's reasoning pass: a few seconds instead of ~80 s, "
+              "but it follows the editing rules less reliably.")
+@click.option("--plan", "plan_path", type=click.Path(dir_okay=False, path_type=Path),
+              help="Edit plan JSON: loaded if it exists, otherwise written after --ai asks the model.")
 @click.option("--no-title", is_flag=True, help="Skip the title card.")
 @click.option("--no-bug", is_flag=True, help="Skip the corner bug.")
 @click.option("--no-lower-thirds", is_flag=True)
@@ -138,6 +170,7 @@ def _save(img, path: Path) -> Path:
 @click.option("--dry-run", is_flag=True, help="Print the timeline and FFmpeg command without encoding.")
 def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None, episode: int, week: str, featuring: str,
          league: str, channel: str, next_up: str, team: str, names_path: Path | None, title_style: str, title_seconds: float,
+         ai_url: str | None, ai_model: str | None, ai_fast: bool, plan_path: Path | None,
          kill_padding: float | None, slowmo: str, slowmo_clips: str, slowmo_speed: float, snap_cuts_on: bool, music: Path | None, music_volume: float, music_start: float | None,
          order: str, reverse: bool, seed: int | None, pick: str | None, skip: str | None,
          end_seconds: float, lower_third_seconds: float, lower_third_scale: float, end_mode: str, no_title: bool, no_bug: bool, no_lower_thirds: bool, no_punch: bool,
@@ -190,6 +223,15 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
             mains.append((v, info))
             timelines.append(tl)
         timeline = merge_timelines(timelines)
+        if ai_url or (plan_path and plan_path.is_file()):
+            ctx = click.get_current_context()
+            plan = _edit_plan(timeline, ai_url, ai_model, plan_path, think=not ai_fast)
+            if not (order != "chronological" or pick or skip or reverse):
+                pick = ",".join(map(str, plan.order))
+            if plan.slowmo and ctx.get_parameter_source("slowmo_clips") == click.core.ParameterSource.DEFAULT:
+                slowmo_clips = ",".join(map(str, plan.slowmo))
+                if slowmo == "none":
+                    slowmo = "last"
         if order != "chronological" or reverse or pick or skip:
             click.echo("Clips as recorded:")
             for c in timeline.clips:

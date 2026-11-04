@@ -82,6 +82,7 @@ cotw files --episode 1 -o output/cotw-ep01.mp4
 | `--slowmo-clips auto\|all\|3,5` | Which clips get it (default `auto`: signature clips, i.e. clutch/ace/4K, best first, at most a third of the episode) |
 | `--slowmo-speed X` | Speed in the slowest part (default 0.5, from 120 fps footage that stays smooth at 60 fps) |
 | `--snap-cuts` | Move each cut onto the nearest beat of `--music` (`pip install -e '.[beats]'`) |
+| `--ai URL` / `--plan FILE` / `--ai-fast` | Let a local LLM suggest clip order and slow-motion clips, save/load the plan (see below) |
 | `--fps N` | Output frame rate (default 60; 120 fps sources are just headroom for slow motion) |
 | `--channel NAME` | Handle on the end card (default `@LANChampGG`) |
 | `--lower-third-scale X` | Lower-third size (default 0.65; 1.0 is the original, larger plate) |
@@ -130,6 +131,24 @@ tape (the pitch drops) and low-passed, which avoids the smearing of time-stretch
 `--snap-cuts` lengthens or shortens the end of each clip so the cut lands on a beat, never cutting off
 a kill. It needs `librosa` (`pip install -e '.[beats]'`); beats are cached next to the track as
 `<track>.beats.json`.
+
+## AI edit plan (optional)
+
+A local OpenAI-compatible LLM (tested with vLLM serving Qwen) can suggest the clip order and which
+clips get slow motion:
+
+```bash
+cotw files --episode 1 --kill-padding 2.5 --ai http://192.168.1.231:8000/v1 --plan output/ep01.plan.json \
+     --snap-cuts --music "files/song.mp3" -o output/cotw-ep01.mp4
+```
+
+The model only picks clip numbers (it sees display names, scores and kill times, never SteamIDs).
+Its answer is validated (real clip numbers, no repeats, nothing missing, at most a third of the
+clips in slow motion) and saved to `--plan`; if that file already exists it is loaded instead, so you
+can edit it by hand and re-render the same cut without calling the model again. Explicit `--order`,
+`--pick`, `--skip` and `--slowmo-clips` always win over the model. Set `COTW_AI_URL` instead of
+`--ai` if you like. The model reasons first, which takes about 80 s but follows the rules much better
+(it ends on the best clip); `--ai-fast` skips that and answers in a few seconds.
 
 ## Player names and teams
 
