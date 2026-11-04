@@ -156,7 +156,7 @@ can edit it by hand and re-render the same cut without calling the model again. 
 A second command that makes a beat-synced highlight edit ("FUZZYHAT: Echo"), not a Clip of the Week:
 
 ```bash
-cotw-frag files --music "files/FLAMEBOY - Echo.mp3" --title FuzzyHat -o "output/FuzzyHat - Echo.mp4"
+cotw-frag files --music "files/FLAMEBOY - Echo.mp3" --name FuzzyHat -o "output/FuzzyHat - Echo.mp4"
 cotw-frag files --player fuzzyhat --music "files/song.mp3"      # only that player's clips
 ```
 
@@ -167,10 +167,9 @@ cotw-frag files --player fuzzyhat --music "files/song.mp3"      # only that play
   (`--slowmo auto|all|none`, tape-style audio as above).
 - **Effects** on kills: zoom punch, plus screen shake, a flash and a colour grade on hero kills
   (`--no-effects` to skip).
-- **Motion graphics**: an animated title (letters pop in, RGB-split glitch, light sweep, track and artist
-  line) and a kill counter that ticks up per kill in clips with 2+ kills (`--no-title`, `--no-counter`).
-- The track name and artist come from the file's tags, or from an `Artist - Title.mp3` file name
-  (`--track-name` overrides). The game audio is mixed under the music (`--game-volume`, `--music-volume`).
+- There is no title card or kill counter: the edit goes straight into the clips.
+- The output file name is `<name> - <track>.mp4`; the track comes from the file's tags or an
+  `Artist - Title.mp3` file name (`--name` / `--track-name` override). The game audio is mixed under the music (`--game-volume`, `--music-volume`).
 - Output is 60 fps from the 120 fps sources, like `cotw`. `--max-seconds` caps the length (for shorts).
 
 ## Player names and teams
