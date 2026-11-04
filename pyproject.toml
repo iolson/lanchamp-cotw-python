@@ -19,6 +19,7 @@ beats = ["librosa>=0.10"]  # --snap-cuts
 
 [project.scripts]
 cotw = "cotw.cli:main"
+cotw-frag = "cotw.frag:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

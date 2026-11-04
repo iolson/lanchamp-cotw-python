@@ -83,6 +83,7 @@ cotw files --episode 1 -o output/cotw-ep01.mp4
 | `--slowmo-speed X` | Speed in the slowest part (default 0.5, from 120 fps footage that stays smooth at 60 fps) |
 | `--snap-cuts` | Move each cut onto the nearest beat of `--music` (`pip install -e '.[beats]'`) |
 | `--ai URL` / `--plan FILE` / `--ai-fast` | Let a local LLM suggest clip order and slow-motion clips, save/load the plan (see below) |
+| `--music-dir DIR` | Choose the track from a folder: with `--ai` the model picks the best fit from each track's length, tempo and energy curve (cached as `<track>.analysis.json`); otherwise the one closest in length to the video |
 | `--fps N` | Output frame rate (default 60; 120 fps sources are just headroom for slow motion) |
 | `--channel NAME` | Handle on the end card (default `@LANChampGG`) |
 | `--lower-third-scale X` | Lower-third size (default 0.65; 1.0 is the original, larger plate) |
@@ -149,6 +150,28 @@ can edit it by hand and re-render the same cut without calling the model again. 
 `--pick`, `--skip` and `--slowmo-clips` always win over the model. Set `COTW_AI_URL` instead of
 `--ai` if you like. The model reasons first, which takes about 80 s but follows the rules much better
 (it ends on the best clip); `--ai-fast` skips that and answers in a few seconds.
+
+## Frag-movie edits: `cotw-frag`
+
+A second command that makes a beat-synced highlight edit ("FUZZYHAT: Echo"), not a Clip of the Week:
+
+```bash
+cotw-frag files --music "files/FLAMEBOY - Echo.mp3" --title FuzzyHat -o "output/FuzzyHat - Echo.mp4"
+cotw-frag files --player fuzzyhat --music "files/song.mp3"      # only that player's clips
+```
+
+- Kills are grouped into **bursts**; each becomes a segment whose last (hero) kill lands exactly on a
+  beat of the music, so cuts and kills hit the rhythm. Bursts are ordered weakest to best
+  (`--order score`) and the weakest are dropped first when the track is too short.
+- **Eased slow motion** on the hero kill of each clip's final burst when the clip has 3+ kills
+  (`--slowmo auto|all|none`, tape-style audio as above).
+- **Effects** on kills: zoom punch, plus screen shake, a flash and a colour grade on hero kills
+  (`--no-effects` to skip).
+- **Motion graphics**: an animated title (letters pop in, RGB-split glitch, light sweep, track and artist
+  line) and a kill counter that ticks up per kill in clips with 2+ kills (`--no-title`, `--no-counter`).
+- The track name and artist come from the file's tags, or from an `Artist - Title.mp3` file name
+  (`--track-name` overrides). The game audio is mixed under the music (`--game-volume`, `--music-volume`).
+- Output is 60 fps from the 120 fps sources, like `cotw`. `--max-seconds` caps the length (for shorts).
 
 ## Player names and teams
 
