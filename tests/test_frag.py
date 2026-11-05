@@ -122,3 +122,24 @@ def test_build_up_uses_footage_away_from_kills():
     assert all(a.end == b.start for a, b in zip(segs, segs[1:]))
     assert all(not s.burst.kills for s in segs)
     assert frag.plan_transitions(segs, "auto", 1) == []
+
+
+def test_pov_ranges_merge_and_cut_the_footage_into_islands():
+    from cotw import pov
+    bad = pov.bad_ranges([True, False, False, True, True, False])
+    assert bad == [(0.7, 3.3), (4.7, 6.3)]
+    assert pov.good_islands(0.0, 8.0, bad) == [(0.0, 0.7), (3.3, 4.7), (6.3, 8.0)]
+
+
+def test_bursts_and_broll_avoid_non_pov_ranges():
+    c = _clip()  # kills at 105, 106 and 120 in a clip spanning 100..140
+    bad = {0: [(110.0, 115.0)]}
+    bursts = frag.bursts_from([c], bad)
+    assert [(b.lo, b.hi) for b in bursts] == [(100.0, 110.0), (115.0, 140.0)]
+    assert all(b.lo <= k[0] <= b.hi for b in bursts for k in b.kills)
+    for _, start, length in frag.broll_windows([c], bad):
+        assert start + length <= 110.0 or start >= 115.0
+    # a kill inside a flagged range is dropped
+    assert [len(b.kills) for b in frag.bursts_from([c], {0: [(119.0, 121.0)]})] == [2]
+    segs = frag.place(frag.bursts_from([c], bad), GRID, 100.0, "none", 0.5)
+    assert all(s.src_start + s.src_len <= 110.0 or s.src_start >= 115.0 for s in segs)

@@ -16,11 +16,13 @@ from pathlib import Path
 
 import click
 
+from cotw.ai import AiError
 from cotw.beats import BeatError, analyze_track, detect_beats
 from cotw.compose import (
     CUT_FADE, SLOW_AUDIO, FfmpegError, MediaInfo, _Graph, _num, audio_duration, find_ffmpeg, probe, run_ffmpeg,
 )
 from cotw.graphics import H, W
+from cotw.pov import bad_ranges, good_islands, scan
 from cotw.plan import (
     PlanError, RAMP_IN, SLOW_AFTER, SLOW_BEFORE, RAMP_OUT, ClipPlan, build_segments, build_timeline, clip_length,
     load_names, load_report, merge_timelines,
@@ -45,6 +47,8 @@ class Burst:
     base: int = 0  # kills of this clip before the burst
     total: int = 0  # kills in the whole clip
     finale: bool = False  # the clip's last burst
+    lo: float | None = None  # footage the burst may use (source seconds); None: the whole clip
+    hi: float | None = None
 
     @property
     def first(self) -> float:
@@ -102,19 +106,27 @@ def _rank(b: Burst) -> tuple:
     return (b.score, b.clip.number, b.first)  # weakest first; a clip's bursts stay in recording order
 
 
-def bursts_from(clips: list[ClipPlan]) -> list[Burst]:
+def bursts_from(clips: list[ClipPlan], bad: dict[int, list[tuple[float, float]]] | None = None) -> list[Burst]:
+    """Kills grouped into bursts. `bad` maps a video index to source ranges that must not be shown: kills in them
+    are dropped and a burst never spans one."""
     out: list[Burst] = []
     for clip in clips:
+        islands = good_islands(clip.src_start, clip.src_start + clip.src_len, (bad or {}).get(clip.source, []))
         ks = sorted((clip.src_start + t, hs, sp) for t, hs, sp in clip.kills)
-        groups: list[list[tuple[float, bool, bool]]] = []
+        groups: list[tuple[list[tuple[float, bool, bool]], tuple[float, float]]] = []
         for k in ks:
-            if groups and k[0] - groups[-1][-1][0] <= BURST_GAP:
-                groups[-1].append(k)
+            island = next((i for i in islands if i[0] - 1e-6 <= k[0] <= i[1] + 1e-6), None)
+            if island is None:
+                continue
+            if groups and groups[-1][1] == island and k[0] - groups[-1][0][-1][0] <= BURST_GAP:
+                groups[-1][0].append(k)
             else:
-                groups.append([k])
+                groups.append(([k], island))
+        total = sum(len(g) for g, _ in groups)
         done = 0
-        for gi, group in enumerate(groups):
-            out.append(Burst(clip, tuple(group), clip.score, done, len(ks), gi == len(groups) - 1))
+        for gi, (group, (lo, hi)) in enumerate(groups):
+            lo_, hi_ = (None, None) if not bad else (lo, hi)
+            out.append(Burst(clip, tuple(group), clip.score, done, total, gi == len(groups) - 1, lo_, hi_))
             done += len(group)
     return out
 
@@ -133,7 +145,9 @@ def src_to_out(segments: list[tuple[float, float, float]], offset: float) -> flo
 def _fit(b: Burst, lead: float, total: float, slow: bool, speed: float):
     """Source window so the hero kill is `lead` seconds into a segment of `total` seconds on screen.
     Returns (src_start, src_len, slow windows) or None when the footage does not allow it."""
-    lo, hi, hero = b.clip.src_start, b.clip.src_start + b.clip.src_len, b.hero
+    lo = b.clip.src_start if b.lo is None else b.lo
+    hi = b.clip.src_start + b.clip.src_len if b.hi is None else b.hi
+    hero = b.hero
     if not slow:
         start, length = hero - lead, total
         return (start, length, ()) if start >= lo - 1e-6 and start + length <= hi + 1e-6 else None
@@ -187,17 +201,20 @@ def pace_factor(tracks: list[Track], pace: str):
     return factor
 
 
-def broll_windows(clips: list[ClipPlan]) -> list[tuple[ClipPlan, float, float]]:
+def broll_windows(clips: list[ClipPlan], bad: dict[int, list[tuple[float, float]]] | None = None
+                  ) -> list[tuple[ClipPlan, float, float]]:
     """(clip, source start, length) of footage away from every kill, for the build-up."""
     out = []
     for c in clips:
-        cursor, hi = c.src_start, c.src_start + c.src_len
+        spans, cursor, hi = [], c.src_start, c.src_start + c.src_len
         for t in sorted(c.src_start + t for t, _, _ in c.kills):
-            if t - BROLL_BEFORE - cursor >= BROLL_MIN:
-                out.append((c, cursor, t - BROLL_BEFORE - cursor))
+            spans.append((cursor, t - BROLL_BEFORE))
             cursor = max(cursor, t + BROLL_AFTER)
-        if hi - cursor >= BROLL_MIN:
-            out.append((c, cursor, hi - cursor))
+        spans.append((cursor, hi))
+        for a, b in spans:
+            for ia, ib in good_islands(a, b, (bad or {}).get(c.source, [])) if b > a else []:
+                if ib - ia >= BROLL_MIN:
+                    out.append((c, ia, ib - ia))
     return out
 
 
@@ -489,6 +506,12 @@ def track_labels(ffmpeg: Path, track: Path) -> tuple[str, str]:
 @click.option("--build-up", "build_up_seconds", type=click.FloatRange(min=0), default=0.0, show_default=True,
               help="Open with about this many seconds of b-roll (footage away from the kills) cut to the "
                    "music before the first kill; the kills then start on the next beat.")
+@click.option("--pov-only", is_flag=True,
+              help="Leave out cinematic cutaways, free camera, intros and anything else that is not a player's "
+                   "first-person view. The --ai model looks at a frame every second (cached next to each video).")
+@click.option("--ai", "ai_url", envvar="COTW_AI_URL", metavar="URL",
+              help="OpenAI-compatible vision model (e.g. http://host:8000/v1) used by --pov-only.")
+@click.option("--ai-model", help="Model name for --ai (default: the server's first model).")
 @click.option("--max-seconds", type=float, help="Cap the edit's length (default: the music's length).")
 @click.option("--no-effects", is_flag=True, help="Skip the per-kill zoom punch, shake, flash and vignette.")
 @click.option("--letterbox", is_flag=True, help="Cinematic black bars (see --letterbox-ratio).")
@@ -511,7 +534,7 @@ def track_labels(ffmpeg: Path, track: Path) -> tuple[str, str]:
 @click.option("--ffmpeg", "ffmpeg_path", type=click.Path(dir_okay=False, path_type=Path))
 @click.option("--dry-run", is_flag=True, help="Print the plan and FFmpeg command only.")
 def main(videos, music_paths, name, track_name, player, output, order, seed, slowmo, slowmo_speed, build_up_seconds,
-         max_seconds, no_effects, letterbox, letterbox_ratio, grade, transitions, sync, pace, game_volume, music_volume,
+         pov_only, ai_url, ai_model, max_seconds, no_effects, letterbox, letterbox_ratio, grade, transitions, sync, pace, game_volume, music_volume,
          names_path, fps, encoder, quality, ffmpeg_path, dry_run) -> None:
     """Cut a beat-synced highlight edit from VIDEOS (cs2-highlights MP4s with their JSON)."""
     if len(videos) == 1 and videos[0].is_dir():
@@ -531,7 +554,18 @@ def main(videos, music_paths, name, track_name, player, output, order, seed, slo
             clips = [c for c in clips if c.player.lower() == player.lower()]
             if not clips:
                 raise click.UsageError(f"no clips by {player!r}")
-        bursts = bursts_from(clips)
+        bad: dict[int, list[tuple[float, float]]] = {}
+        if pov_only:
+            if not ai_url:
+                raise click.UsageError("--pov-only needs --ai URL (or COTW_AI_URL)")
+            for i, (v, _) in enumerate(mains):
+                if not any(c.source == i for c in clips):
+                    continue
+                click.echo(f"Checking {v.name} for non-first-person footage ...")
+                bad[i] = bad_ranges(scan(ffmpeg, v, ai_url.rstrip("/"), ai_model))
+                if bad[i]:
+                    click.echo("  skipping " + ", ".join(f"{a:.1f}-{b:.1f}s" for a, b in bad[i]))
+        bursts = bursts_from(clips, bad or None)
         if not bursts:
             raise click.UsageError("the reports have no per-kill data (beat_targets)")
         tracks: list[Track] = []
@@ -540,7 +574,7 @@ def main(videos, music_paths, name, track_name, player, output, order, seed, slo
             facts = analyze_track(path)
             tracks.append(Track(path, audio_duration(ffmpeg, path), start,
                                 tuple(start + b for b in detect_beats(path)), tuple(facts["energy_per_10s"])))
-    except (FfmpegError, PlanError, BeatError) as exc:
+    except (FfmpegError, PlanError, BeatError, AiError) as exc:
         raise click.ClickException(str(exc)) from exc
 
     music_seconds = tracks[-1].start + tracks[-1].seconds
@@ -553,7 +587,7 @@ def main(videos, music_paths, name, track_name, player, output, order, seed, slo
         if first is None or grid[first] >= limit:
             raise click.ClickException("the build-up is longer than the music")
         try:
-            intro = build_up(broll_windows(clips), grid, first, factor)
+            intro = build_up(broll_windows(clips, bad or None), grid, first, factor)
         except PlanError as exc:
             raise click.ClickException(str(exc)) from exc
     segs = arrange_bursts(bursts, grid, limit, order, seed, slowmo, slowmo_speed, flags, factor, first)

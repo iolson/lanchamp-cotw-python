@@ -8,3 +8,4 @@ files/
 names.json
 *.beats.json
 *.analysis.json
+*.pov.json
