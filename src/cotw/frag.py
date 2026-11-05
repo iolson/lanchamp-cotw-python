@@ -31,6 +31,10 @@ PRE_ROLL = 1.2  # seconds before a burst's first kill
 TAIL = 1.3  # least seconds kept after the hero kill
 MAX_LEAD_STEPS = 40
 MAX_LEAD_SECONDS = 12.0
+BROLL_BEFORE = 1.0  # b-roll stays this far from the next kill
+BROLL_AFTER = 1.5  # ... and this far after the last one
+BROLL_MIN = 1.2  # shortest usable b-roll window
+BROLL_SHOT = 2.0  # typical b-roll shot length
 
 
 @dataclass(frozen=True)
@@ -183,12 +187,58 @@ def pace_factor(tracks: list[Track], pace: str):
     return factor
 
 
+def broll_windows(clips: list[ClipPlan]) -> list[tuple[ClipPlan, float, float]]:
+    """(clip, source start, length) of footage away from every kill, for the build-up."""
+    out = []
+    for c in clips:
+        cursor, hi = c.src_start, c.src_start + c.src_len
+        for t in sorted(c.src_start + t for t, _, _ in c.kills):
+            if t - BROLL_BEFORE - cursor >= BROLL_MIN:
+                out.append((c, cursor, t - BROLL_BEFORE - cursor))
+            cursor = max(cursor, t + BROLL_AFTER)
+        if hi - cursor >= BROLL_MIN:
+            out.append((c, cursor, hi - cursor))
+    return out
+
+
+def build_up(windows: list[tuple[ClipPlan, float, float]], grid: list[float], end: int, factor=None) -> list[Seg]:
+    """Kill-free shots cut on the grid from 0 s to grid[end], taking turns between the clips' b-roll."""
+    if not windows:
+        raise PlanError("no footage away from the kills to build up with")
+    longest = max(w[2] for w in windows)
+    used = [0.0] * len(windows)
+    segs: list[Seg] = []
+    i = turn = 0
+    while i < end:
+        want = BROLL_SHOT * (factor(grid[i]) if factor else 1.0)
+        k = next((k for k in range(i + 1, end + 1) if grid[k] - grid[i] >= want), end)
+        if grid[end] - grid[k] < 1.0:
+            k = end  # no stub shot at the end
+        while k > i and grid[k] - grid[i] > longest:
+            k -= 1
+        if k <= i:
+            raise PlanError("the b-roll windows are shorter than one beat")
+        length = grid[k] - grid[i]
+        for _ in range(2):  # a window with room left, else start the windows over
+            w = next((w for w in ((turn + n) % len(windows) for n in range(len(windows)))
+                      if windows[w][2] - used[w] >= length - 1e-6), None)
+            if w is not None:
+                break
+            used = [0.0] * len(windows)
+        clip, start, _ = windows[w]
+        segs.append(Seg(Burst(clip, (), 0.0), grid[i], grid[k], start + used[w], length))
+        used[w] += length
+        turn = w + 1
+        i = k
+    return segs
+
+
 def place(bursts: list[Burst], grid: list[float], limit: float, slowmo: str, speed: float,
-          flags: list[bool] | None = None, factor=None) -> list[Seg]:
-    """Lay bursts on the cut grid in order; stop when the next one would run past `limit`."""
+          flags: list[bool] | None = None, factor=None, first: int = 0) -> list[Seg]:
+    """Lay bursts on the cut grid in order, from grid point `first`; stop when the next one would run past `limit`."""
     flags = flags or [True] * len(grid)
     segs: list[Seg] = []
-    j = 0
+    j = first
     for b in bursts:
         f = factor(grid[j]) if factor else 1.0
         want_slow = slowmo == "all" or (slowmo == "auto" and b.finale and b.total >= 3)
@@ -228,7 +278,8 @@ def place(bursts: list[Burst], grid: list[float], limit: float, slowmo: str, spe
 
 
 def arrange_bursts(bursts: list[Burst], grid: list[float], limit: float, order: str, seed: int | None,
-                   slowmo: str, speed: float, flags: list[bool] | None = None, factor=None) -> list[Seg]:
+                   slowmo: str, speed: float, flags: list[bool] | None = None, factor=None,
+                   first: int = 0) -> list[Seg]:
     """Order the bursts and drop the weakest until what is left fits the music."""
     if order == "score":
         bursts = sorted(bursts, key=_rank)
@@ -237,7 +288,7 @@ def arrange_bursts(bursts: list[Burst], grid: list[float], limit: float, order: 
         random.Random(seed).shuffle(bursts)
     keep = bursts[:]
     while keep:
-        segs = place(keep, grid, limit, slowmo, speed, flags, factor)
+        segs = place(keep, grid, limit, slowmo, speed, flags, factor, first)
         if len(segs) == len(keep):
             return segs
         weakest = min(keep, key=_rank)
@@ -255,6 +306,8 @@ def plan_transitions(segs: list[Seg], mode: str, seed: int | None) -> list[tuple
     for s in segs[1:]:
         if mode in TRANSITION_KINDS:
             out.append((s.start, mode))
+        elif not s.burst.kills:
+            continue  # the build-up is cut clean
         elif s.burst.finale and s.burst.total >= 4:
             out.append((s.start, "flash"))
         else:
@@ -433,6 +486,9 @@ def track_labels(ffmpeg: Path, track: Path) -> tuple[str, str]:
 @click.option("--slowmo", type=click.Choice(["auto", "all", "none"]), default="auto", show_default=True,
               help="Eased slow motion on the hero kill: auto = bursts of 3+ kills.")
 @click.option("--slowmo-speed", type=click.FloatRange(0.5, 0.95), default=0.5, show_default=True)
+@click.option("--build-up", "build_up_seconds", type=click.FloatRange(min=0), default=0.0, show_default=True,
+              help="Open with about this many seconds of b-roll (footage away from the kills) cut to the "
+                   "music before the first kill; the kills then start on the next beat.")
 @click.option("--max-seconds", type=float, help="Cap the edit's length (default: the music's length).")
 @click.option("--no-effects", is_flag=True, help="Skip the per-kill zoom punch, shake, flash and vignette.")
 @click.option("--letterbox", is_flag=True, help="Cinematic black bars (see --letterbox-ratio).")
@@ -454,8 +510,8 @@ def track_labels(ffmpeg: Path, track: Path) -> tuple[str, str]:
 @click.option("--quality", type=int, default=Look.quality, show_default=True)
 @click.option("--ffmpeg", "ffmpeg_path", type=click.Path(dir_okay=False, path_type=Path))
 @click.option("--dry-run", is_flag=True, help="Print the plan and FFmpeg command only.")
-def main(videos, music_paths, name, track_name, player, output, order, seed, slowmo, slowmo_speed, max_seconds,
-         no_effects, letterbox, letterbox_ratio, grade, transitions, sync, pace, game_volume, music_volume,
+def main(videos, music_paths, name, track_name, player, output, order, seed, slowmo, slowmo_speed, build_up_seconds,
+         max_seconds, no_effects, letterbox, letterbox_ratio, grade, transitions, sync, pace, game_volume, music_volume,
          names_path, fps, encoder, quality, ffmpeg_path, dry_run) -> None:
     """Cut a beat-synced highlight edit from VIDEOS (cs2-highlights MP4s with their JSON)."""
     if len(videos) == 1 and videos[0].is_dir():
@@ -490,13 +546,27 @@ def main(videos, music_paths, name, track_name, player, output, order, seed, slo
     music_seconds = tracks[-1].start + tracks[-1].seconds
     grid, flags = build_grid(tracks, loose=sync == "loose")
     limit = min(music_seconds - 1.0, max_seconds or 1e9)
-    segs = arrange_bursts(bursts, grid, limit, order, seed, slowmo, slowmo_speed, flags, pace_factor(tracks, pace))
+    factor = pace_factor(tracks, pace)
+    first, intro = 0, []
+    if build_up_seconds > 0:
+        first = next((j for j, t in enumerate(grid) if t >= build_up_seconds), None)
+        if first is None or grid[first] >= limit:
+            raise click.ClickException("the build-up is longer than the music")
+        try:
+            intro = build_up(broll_windows(clips), grid, first, factor)
+        except PlanError as exc:
+            raise click.ClickException(str(exc)) from exc
+    segs = arrange_bursts(bursts, grid, limit, order, seed, slowmo, slowmo_speed, flags, factor, first)
     if not segs:
         raise click.ClickException("no bursts fit on the beat grid")
-    click.echo(f"{len(segs)} of {len(bursts)} bursts, {segs[-1].end:.1f}s, music "
+    segs = intro + segs
+    click.echo(f"{len(segs) - len(intro)} of {len(bursts)} bursts{f' + {len(intro)} build-up shots' if intro else ''}, {segs[-1].end:.1f}s, music "
                f"{' + '.join(t.path.name for t in tracks)} ({music_seconds:.0f}s)")
     for s in segs:
         c = s.burst.clip
+        if not s.burst.kills:
+            click.echo(f"  {s.start:6.1f}-{s.end:6.1f}s  build-up · {c.player}")
+            continue
         click.echo(f"  {s.start:6.1f}-{s.end:6.1f}s  {c.player} · {len(s.burst.kills)} of {s.burst.total} kills · score {s.burst.score:g}"
                    f"{'  slow-mo' if s.slow else ''}")
 

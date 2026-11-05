@@ -105,3 +105,20 @@ def test_build_args_has_the_optional_looks_only_when_asked():
 def test_effect_expressions_cannot_overflow_for_late_kills():
     z, br, sx, sy = frag._punch_exprs([(120.0, True, 3, 3)])
     assert "max(0,t-120)" in br and "exp(-16*max(0,t-120))" in br and "exp(16" not in br
+
+
+def test_build_up_uses_footage_away_from_kills():
+    clips = [_clip(1), _clip(2)]
+    wins = frag.broll_windows(clips)
+    assert wins
+    for c, start, length in wins:
+        for t, _, _ in c.kills:
+            k = c.src_start + t
+            assert not (start - 1e-6 <= k + 1.5 and k - 1.0 <= start + length + 1e-6) or start + length <= k - 1.0 + 1e-6 or start >= k + 1.5 - 1e-6
+    grid = [i * 0.5 for i in range(40)]
+    first = next(j for j, t in enumerate(grid) if t >= 8.0)
+    segs = frag.build_up(wins, grid, first)
+    assert segs[0].start == 0 and segs[-1].end == grid[first]
+    assert all(a.end == b.start for a, b in zip(segs, segs[1:]))
+    assert all(not s.burst.kills for s in segs)
+    assert frag.plan_transitions(segs, "auto", 1) == []

@@ -174,6 +174,9 @@ cotw-frag files --player fuzzyhat --music "files/song.mp3"      # only that play
 - **Looser sync** (`--sync loose`, the default): cuts may also land on half beats while hero kills
   always land on a beat; `--sync tight` keeps everything on beats. **Pacing** (`--pace auto`): longer
   shots where the music is quiet and quick cuts where it is loud; `--pace flat` for even pacing.
+  **Build-up** (`--build-up 8`): open with about 8 seconds of b-roll (footage away from the kills, taken from
+  the clips' lead-in and gaps) cut to the music with clean cuts and no kill effects; the kills start on the
+  next beat.
 - **Several songs**: repeat `--music`; the tracks play in order and overlap by a second, and cuts
   keep following the beats across the change.
 - There is no title card or kill counter: the edit goes straight into the clips.
