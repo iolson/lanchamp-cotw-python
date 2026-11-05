@@ -7,6 +7,7 @@ There is no title card: the edit goes straight into the clips.
 
 from __future__ import annotations
 
+import json
 import random
 import re
 import subprocess
@@ -25,7 +26,7 @@ from cotw.graphics import H, W
 from cotw.pov import bad_ranges, good_islands, scan
 from cotw.plan import (
     PlanError, RAMP_IN, SLOW_AFTER, SLOW_BEFORE, RAMP_OUT, ClipPlan, build_segments, build_timeline, clip_length,
-    load_names, load_report, merge_timelines,
+    Timeline, load_names, load_report, merge_timelines,
 )
 
 BURST_GAP = 3.0  # kills closer than this belong to the same burst
@@ -470,6 +471,16 @@ def build_args(mains: list[tuple[Path, MediaInfo]], segs: list[Seg], tracks: lis
             "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(output)]
 
 
+def _is_broll(video: Path) -> bool:
+    """True for a cs2-highlights b-roll export (JSON with "kind": "broll"), or one with no JSON at all."""
+    try:
+        return json.loads(video.with_suffix(".json").read_text(encoding="utf-8")).get("kind") == "broll"
+    except OSError:
+        return True
+    except ValueError:
+        return False
+
+
 def track_labels(ffmpeg: Path, track: Path) -> tuple[str, str]:
     """(track name, artist) from the file's tags, else from an 'Artist - Title.mp3' file name."""
     tags: dict[str, str] = {}
@@ -506,6 +517,9 @@ def track_labels(ffmpeg: Path, track: Path) -> tuple[str, str]:
 @click.option("--build-up", "build_up_seconds", type=click.FloatRange(min=0), default=0.0, show_default=True,
               help="Open with about this many seconds of b-roll (footage away from the kills) cut to the "
                    "music before the first kill; the kills then start on the next beat.")
+@click.option("--broll", "broll_dir", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              help="Folder of extra cs2-highlights MP4s (with their JSON) used for the --build-up instead of "
+                   "the main clips' own footage.")
 @click.option("--pov-only", is_flag=True,
               help="Leave out cinematic cutaways, free camera, intros and anything else that is not a player's "
                    "first-person view. The --ai model looks at a frame every second (cached next to each video).")
@@ -534,7 +548,7 @@ def track_labels(ffmpeg: Path, track: Path) -> tuple[str, str]:
 @click.option("--ffmpeg", "ffmpeg_path", type=click.Path(dir_okay=False, path_type=Path))
 @click.option("--dry-run", is_flag=True, help="Print the plan and FFmpeg command only.")
 def main(videos, music_paths, name, track_name, player, output, order, seed, slowmo, slowmo_speed, build_up_seconds,
-         pov_only, ai_url, ai_model, max_seconds, no_effects, letterbox, letterbox_ratio, grade, transitions, sync, pace, game_volume, music_volume,
+         broll_dir, pov_only, ai_url, ai_model, max_seconds, no_effects, letterbox, letterbox_ratio, grade, transitions, sync, pace, game_volume, music_volume,
          names_path, fps, encoder, quality, ffmpeg_path, dry_run) -> None:
     """Cut a beat-synced highlight edit from VIDEOS (cs2-highlights MP4s with their JSON)."""
     if len(videos) == 1 and videos[0].is_dir():
@@ -543,13 +557,22 @@ def main(videos, music_paths, name, track_name, player, output, order, seed, slo
         ffmpeg = find_ffmpeg(ffmpeg_path)
         names_path = names_path or (Path("names.json") if Path("names.json").is_file() else None)
         names = load_names(names_path) if names_path else {}
+        broll_videos = sorted(broll_dir.glob("*.mp4")) if broll_dir else []
+        if broll_dir and not broll_videos:
+            raise click.UsageError(f"no MP4 files in {broll_dir}")
         mains, timelines = [], []
-        for v in videos:
+        for v in [*videos, *broll_videos]:
             info = probe(ffmpeg, v)
-            tl = build_timeline(load_report(v.with_suffix(".json")), video_duration=info.duration, names=names)
+            if v in broll_videos and _is_broll(v):  # empty-map footage: the whole video is usable
+                tl = Timeline([ClipPlan(1, 0.0, info.duration, "b-roll", "", "", None, src_len=info.duration)],
+                              info.duration)
+            else:
+                tl = build_timeline(load_report(v.with_suffix(".json")), video_duration=info.duration, names=names)
             mains.append((v, info))
             timelines.append(tl)
-        clips = merge_timelines(timelines).clips
+        every = merge_timelines(timelines).clips
+        clips = [c for c in every if c.source < len(videos)]
+        broll_clips = [c for c in every if c.source >= len(videos)]
         if player:
             clips = [c for c in clips if c.player.lower() == player.lower()]
             if not clips:
@@ -559,8 +582,8 @@ def main(videos, music_paths, name, track_name, player, output, order, seed, slo
             if not ai_url:
                 raise click.UsageError("--pov-only needs --ai URL (or COTW_AI_URL)")
             for i, (v, _) in enumerate(mains):
-                if not any(c.source == i for c in clips):
-                    continue
+                if not any(c.source == i for c in clips + broll_clips) or (v in broll_videos and _is_broll(v)):
+                    continue  # unused, or empty-map b-roll (no player view by design)
                 click.echo(f"Checking {v.name} for non-first-person footage ...")
                 bad[i] = bad_ranges(scan(ffmpeg, v, ai_url.rstrip("/"), ai_model))
                 if bad[i]:
@@ -587,7 +610,7 @@ def main(videos, music_paths, name, track_name, player, output, order, seed, slo
         if first is None or grid[first] >= limit:
             raise click.ClickException("the build-up is longer than the music")
         try:
-            intro = build_up(broll_windows(clips, bad or None), grid, first, factor)
+            intro = build_up((broll_windows(broll_clips, bad or None) or broll_windows(clips, bad or None)), grid, first, factor)
         except PlanError as exc:
             raise click.ClickException(str(exc)) from exc
     segs = arrange_bursts(bursts, grid, limit, order, seed, slowmo, slowmo_speed, flags, factor, first)

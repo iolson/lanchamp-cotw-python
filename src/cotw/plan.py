@@ -147,7 +147,7 @@ def load_names(path: Path) -> dict[str, PlayerInfo]:
     for key, value in raw.items():
         if isinstance(value, str):  # shorthand: just a display name
             players[key] = PlayerInfo(name=value)
-        elif isinstance(value, dict) and all(isinstance(v, str) for v in value.values()):
+        elif isinstance(value, dict) and all(v is None or isinstance(v, str) for v in value.values()):
             unknown = set(value) - {"name", "team"}
             if unknown:
                 raise PlanError(f"{path}: {key!r} has unknown field(s) {sorted(unknown)} (use name, team)")

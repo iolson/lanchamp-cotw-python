@@ -177,6 +177,7 @@ cotw-frag files --player fuzzyhat --music "files/song.mp3"      # only that play
   **Build-up** (`--build-up 8`): open with about 8 seconds of b-roll (footage away from the kills, taken from
   the clips' lead-in and gaps) cut to the music with clean cuts and no kill effects; the kills start on the
   next beat.
+  `--broll DIR` takes the build-up footage from a separate folder of cs2-highlights MP4s + JSON instead.
   **POV only** (`--pov-only --ai http://host:8000/v1`): a vision model looks at a frame per second of every
   video and anything that is not a player's first-person view (cinematic cutaways, free camera, intros) is
   kept out of the kill shots and the build-up. Results are cached next to each video as `<video>.pov.json`.
