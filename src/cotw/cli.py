@@ -25,7 +25,10 @@ from cotw.compose import (
 from cotw.plan import PlanError, Timeline, build_timeline, load_names, load_report, merge_timelines
 from cotw.ai import AiError, load_plan, suggest_music, suggest_plan
 from cotw.beats import BeatError, analyze_track, detect_beats
-from cotw.plan import ORDERS, SLOWMO_MODES, apply_slowmo, arrange, parse_numbers, snap_cuts
+from cotw.plan import (
+    ORDERS, _map_slug, SLOWMO_MODES, add_broll, apply_slowmo, arrange, parse_numbers, relayout, sections, snap_cuts_multi,
+    song_switches,
+)
 
 
 def render_assets(
@@ -54,7 +57,7 @@ def render_assets(
         assets.bug = save(graphics.corner_bug(meta), "bug.png")
 
     for clip in timeline.clips:
-        if lower_thirds:
+        if lower_thirds and not clip.broll:
             img = graphics.lower_third(clip.player, clip.team or team, clip.stat, clip.context, lt_scale)
             assets.lower_thirds[clip.number] = save(img, f"lower_third_{clip.number:02d}.png")
         if punches and clip.punch:
@@ -100,12 +103,19 @@ def _edit_plan(timeline: Timeline, ai_url: str | None, model: str | None, plan_p
     return plan
 
 
-def _pick_music(timeline: Timeline, folder: Path, ai_url: str | None, model: str | None, think: bool) -> Path:
+def _pick_music(timeline: Timeline, folder: Path, ai_url: str | None, model: str | None, think: bool,
+                title: float = 0.0) -> list[Path]:
     tracks = sorted(p for p in folder.iterdir() if p.suffix.lower() in (".mp3", ".wav", ".m4a", ".flac", ".ogg"))
     if not tracks:
         raise click.UsageError(f"no audio files in {folder}")
     try:
         facts = [analyze_track(p) for p in tracks]
+        need = timeline.duration + title - 5.0
+        if len(facts) > 1 and not any(f["seconds"] >= need for f in facts):
+            facts.sort(key=lambda f: sum(f["energy_per_10s"]) / max(1, len(f["energy_per_10s"])))
+            click.echo(f"Music: no single track covers {need + 5:.0f}s, so all {len(facts)} are used, quietest first: "
+                       + " -> ".join(f["file"] for f in facts))
+            return [folder / f["file"] for f in facts]
         if ai_url:
             click.echo(f"Asking the model to pick one of {len(tracks)} tracks ...")
             name, why = suggest_music(timeline, facts, ai_url, model, think=think)
@@ -115,7 +125,28 @@ def _pick_music(timeline: Timeline, folder: Path, ai_url: str | None, model: str
             click.echo(f"Music: {name} (closest in length to the video)")
     except (AiError, BeatError) as exc:
         raise click.ClickException(str(exc)) from exc
-    return folder / name
+    return [folder / name]
+
+
+def _load_broll(ffmpeg: Path, folder: Path, mains: list) -> dict[str, list[tuple[int, float]]]:
+    """Empty-map footage under `folder`, by map name. The videos are added to `mains` (the clips' sources)."""
+    footage: dict[str, list[tuple[int, float]]] = {}
+    for video in sorted(folder.rglob("*.mp4")):
+        if "review" in video.parts[len(folder.parts):]:
+            continue
+        try:
+            report = json.loads(video.with_suffix(".json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            click.echo(f"warning: skipping {video.name}: no readable JSON next to it", err=True)
+            continue
+        if report.get("kind") != "broll" or not report.get("map"):
+            continue
+        info = probe(ffmpeg, video)
+        mains.append((video, info))
+        footage.setdefault(_map_slug(report["map"]), []).append((len(mains) - 1, info.duration))
+    for name, files in footage.items():
+        click.echo(f"b-roll {name}: {len(files)} shot(s)")
+    return footage
 
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
@@ -159,11 +190,19 @@ def _pick_music(timeline: Timeline, folder: Path, ai_url: str | None, model: str
               help="Playback speed inside slow motion (0.5 is smooth from a 120 fps source at 60 fps output).")
 @click.option("--snap-cuts", "snap_cuts_on", is_flag=True,
               help="Move each cut onto the nearest beat of --music (needs librosa).")
-@click.option("--music", type=click.Path(exists=True, dir_okay=False, path_type=Path),
-              help="Music track (MP3/WAV), played once from after the title card (faded out if longer than the episode) and ducked under the game audio.")
+@click.option("--music", "music_files", multiple=True, type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Music track (MP3/WAV), played once from after the title card (faded out if longer than the episode) "
+                   "and ducked under the game audio. Repeat it for several songs: the next one starts with a new section.")
 @click.option("--music-dir", type=click.Path(exists=True, file_okay=False, path_type=Path),
               help="Folder of tracks to choose from (with --ai the model picks the best fit; "
-                   "otherwise the one closest in length to the video).")
+                   "otherwise the one closest in length to the video). When no single track covers the "
+                   "video, all of them are used, quietest first.")
+@click.option("--sections", "sections_by", type=click.Choice(["none", "map"]), default="none", show_default=True,
+              help="map: group the clips by map, so each map is a section.")
+@click.option("--broll", "broll_dir", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              help="Folder of empty-map b-roll (cs2-highlights exports, any sub-folders); each section opens with "
+                   "a shot of its map. Needs --sections map.")
+@click.option("--broll-seconds", type=float, default=4.0, show_default=True, help="Length of each b-roll shot.")
 @click.option("--music-volume", type=float, default=Options.music_volume, show_default=True,
               help="Music level before ducking (1.0 = the track's own volume).")
 @click.option("--music-start", type=float,
@@ -192,7 +231,8 @@ def _pick_music(timeline: Timeline, folder: Path, ai_url: str | None, model: str
 def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None, episode: int, week: str, featuring: str,
          league: str, channel: str, next_up: str, team: str, names_path: Path | None, title_style: str, title_seconds: float,
          ai_url: str | None, ai_model: str | None, ai_fast: bool, plan_path: Path | None,
-         kill_padding: float | None, slowmo: str, slowmo_clips: str, slowmo_speed: float, snap_cuts_on: bool, music: Path | None, music_dir: Path | None, music_volume: float, music_start: float | None,
+         kill_padding: float | None, slowmo: str, slowmo_clips: str, slowmo_speed: float, snap_cuts_on: bool, music_files: tuple[Path, ...], music_dir: Path | None, sections_by: str, broll_dir: Path | None,
+         broll_seconds: float, music_volume: float, music_start: float | None,
          order: str, reverse: bool, seed: int | None, pick: str | None, skip: str | None,
          end_seconds: float, lower_third_seconds: float, lower_third_scale: float, end_mode: str, no_title: bool, no_bug: bool, no_lower_thirds: bool, no_punch: bool,
          clips_dir: Path | None, encoder: str, fps: int, quality: int, ffmpeg_path: Path | None,
@@ -261,21 +301,44 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
                                pick=parse_numbers(pick) if pick else None,
                                skip=parse_numbers(skip) if skip else None)
             click.echo("Final order:")
-        if music_dir and not music:
-            music = _pick_music(timeline, music_dir, ai_url, ai_model, not ai_fast)
+        if broll_dir and sections_by != "map":
+            raise click.UsageError("--broll needs --sections map")
+        if sections_by == "map":
+            footage = _load_broll(ffmpeg, broll_dir, mains) if broll_dir else {}
+            timeline = add_broll(timeline, footage, broll_seconds) if footage else relayout(
+                [c for sec in sections(timeline) for c in sec])
+            click.echo("Sections: " + " · ".join(
+                f"{sec[0].map or '?'} ({sum(not c.broll for c in sec)} clips)" for sec in sections(timeline)))
+            if broll_dir and not footage:
+                click.echo("warning: no b-roll footage matched the maps in this episode", err=True)
+        title = 0.0 if no_title else title_seconds
+        songs = list(music_files)
+        if music_dir and not songs:
+            songs = _pick_music(timeline, music_dir, ai_url, ai_model, not ai_fast, title)
         if slowmo != "none":
             sel = slowmo_clips if slowmo_clips in ("auto", "all") else parse_numbers(slowmo_clips)
             timeline = apply_slowmo(timeline, slowmo, slowmo_speed, sel)
             click.echo("Slow motion on clip(s): " + (", ".join(f"#{c.number}" for c in timeline.clips if c.slow) or "none"))
+        song_len = [audio_duration(ffmpeg, p) for p in songs]
+        first = title if music_start is None else music_start
+        switches = song_switches(timeline, song_len, offset=title, start=first) if len(songs) > 1 else []
+        if len(songs) > 1:
+            if len(switches) + 1 < len(songs):
+                click.echo(f"note: {len(songs) - len(switches) - 1} song(s) left out: no later section start fits", err=True)
+            songs, song_len = songs[:len(switches) + 1], song_len[:len(switches) + 1]
         if snap_cuts_on:
-            if not music:
+            if not songs:
                 raise click.UsageError("--snap-cuts needs --music")
-            title = 0.0 if no_title else title_seconds
-            beats = detect_beats(music)
-            if music_start is None and beats:  # put the track's first beat on the first cut
-                music_start = max(0.0, title - beats[0])
-            timeline = snap_cuts(timeline, beats, offset=title,
-                                 music_start=title if music_start is None else music_start)
+            all_beats = [detect_beats(p) for p in songs]
+            if music_start is None and all_beats[0]:  # put the track's first beat on the first cut
+                music_start = max(0.0, title - all_beats[0][0])
+            timeline, song_starts = snap_cuts_multi(timeline, all_beats, switches, offset=title,
+                                                    music_start=title if music_start is None else music_start)
+        else:
+            song_starts = [first] + [title + timeline.clips[i].start for i in switches]
+        for p, st in zip(songs, song_starts):
+            if len(songs) > 1:
+                click.echo(f"Song at {st:6.1f}s: {p.name}")
     except (FfmpegError, PlanError, BeatError) as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -287,8 +350,10 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
     meta = graphics.EpisodeMeta(episode, week, featuring, league, channel, next_up)
     opts = Options(title_seconds=title_seconds, end_seconds=end_seconds, lower_third_seconds=lower_third_seconds,
                    end_mode="append" if end_mode == "off" else end_mode, encoder=encoder, quality=quality, fps=fps,
-                   music=music, music_volume=music_volume, music_start=music_start,
-                   music_duration=audio_duration(ffmpeg, music) if music else None)
+                   music=songs[0] if len(songs) == 1 else None, music_volume=music_volume,
+                   music_start=music_start if len(songs) <= 1 else None,
+                   music_duration=song_len[0] if len(songs) == 1 else None,
+                   tracks=tuple(zip(songs, song_starts, song_len)) if len(songs) > 1 else ())
 
     keep = graphics_only is not None
     work = graphics_only or Path(tempfile.mkdtemp(prefix="cotw-"))

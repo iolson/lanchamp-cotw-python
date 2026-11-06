@@ -262,3 +262,56 @@ def test_snap_cuts_keeps_slow_motion_intact():
     assert snapped.slow == tl.clips[0].slow
     assert snapped.src_len >= snapped.slow[-1][1] + 0.4 - 1e-9  # the ramp out still fits
     assert min(abs(5.0 + snapped.duration - b - 5.0) for b in beats) < 1e-6
+
+
+def _mapped(number, map_name, duration=20.0, score=1.0):
+    from cotw.plan import ClipPlan
+    return ClipPlan(number, 0.0, duration, "p", "3K", "c", None, score=score, src_len=duration, src_max=duration,
+                    min_src=duration, map=map_name)
+
+
+def test_sections_group_by_map_and_the_best_section_comes_last():
+    from cotw.plan import Timeline, relayout, sections
+    tl = relayout([_mapped(1, "dust2", score=9), _mapped(2, "anubis", score=1), _mapped(3, "dust2", score=2),
+                   _mapped(4, "anubis", score=3)])
+    secs = sections(tl)
+    assert [[c.number for c in s] for s in secs] == [[1, 3], [2, 4]]  # in the order their last clip appears
+
+
+def test_add_broll_opens_each_section_with_its_maps_footage():
+    from cotw.plan import add_broll, relayout
+    tl = relayout([_mapped(1, "dust2"), _mapped(2, "anubis"), _mapped(3, "mirage")])
+    out = add_broll(tl, {"dust2": [(5, 8.0)], "anubis": [(6, 2.5)]}, 4.0)
+    assert [(c.broll, c.map) for c in out.clips] == [
+        (True, "dust2"), (False, "dust2"), (True, "anubis"), (False, "anubis"), (False, "mirage")]
+    shots = [c for c in out.clips if c.broll]
+    assert [(c.source, c.src_len, c.duration) for c in shots] == [(5, 4.0, 4.0), (6, 2.5, 2.5)]
+    assert out.duration == sum(c.duration for c in out.clips) and out.clips[1].start == 4.0
+
+
+def test_songs_change_at_a_section_start_when_one_is_near_the_end_of_the_song():
+    from cotw.plan import add_broll, song_switches
+    tl = add_broll(relayout_for_songs(), {"a": [(1, 5.0)], "b": [(2, 5.0)]}, 4.0)
+    # sections: a-broll(0-4) a1 a2 (4-44) | b-broll (44-48) b1 b2 (48-88)
+    assert [c.broll for c in tl.clips] == [True, False, False, True, False, False]
+    assert song_switches(tl, [50.0, 60.0], offset=0.0, start=0.0) == [3]  # the b section starts at 44 <= 49
+
+
+def test_songs_change_at_the_nearest_clip_when_no_section_starts_near_the_song_end():
+    from cotw.plan import song_switches
+    tl = relayout_for_songs()
+    assert song_switches(tl, [30.0, 60.0], offset=0.0, start=0.0) == [1]  # clips start at 0, 20, 40, 60
+
+
+def relayout_for_songs():
+    from cotw.plan import relayout
+    return relayout([_mapped(1, "a"), _mapped(2, "a"), _mapped(3, "b"), _mapped(4, "b")])
+
+
+def test_snap_cuts_multi_starts_the_next_song_on_its_first_beat():
+    from cotw.plan import relayout, snap_cuts_multi
+    tl = relayout([_mapped(i, "a") for i in range(1, 4)])
+    beats1 = [i * 0.5 for i in range(200)]
+    beats2 = [0.3 + i * 0.5 for i in range(200)]
+    out, starts = snap_cuts_multi(tl, [beats1, beats2], [2], offset=0.0, music_start=0.0)
+    assert starts[0] == 0.0 and starts[1] == pytest.approx(out.clips[2].start - 0.3)

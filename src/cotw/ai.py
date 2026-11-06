@@ -124,26 +124,30 @@ def suggest_plan(
     base = base_url.rstrip("/")
     model = model or _first_model(base, timeout)
     clips = [clip_brief(c) for c in timeline.clips]
-    reply = _post(
-        base + "/chat/completions",
-        {
-            "model": model,
-            "temperature": 0.2,
-            "max_tokens": 16000,  # reasoning models spend a lot of this thinking before the JSON
-            "chat_template_kwargs": {"enable_thinking": think},  # vLLM/Qwen: reasoning pass on or off
-            "messages": [
-                {"role": "system", "content": SYSTEM},
-                {"role": "user", "content": f"{RULES}\n\nClips:\n{json.dumps(clips, indent=1)}"},
-            ],
-            "response_format": {"type": "json_schema", "json_schema": {"name": "edit_plan", "schema": SCHEMA}},
-        },
-        timeout,
-    )
-    try:
-        raw = json.loads(reply["choices"][0]["message"]["content"])
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
-        finish = (reply.get("choices") or [{}])[0].get("finish_reason")
-        raise AiError(f"the model did not return a usable plan (finish_reason={finish}): {reply!r:.200}") from exc
+    for reasoning in ([True, False] if think else [False]):
+        reply = _post(
+            base + "/chat/completions",
+            {
+                "model": model,
+                "temperature": 0.2,
+                "max_tokens": 16000,  # reasoning models spend a lot of this thinking before the JSON
+                "chat_template_kwargs": {"enable_thinking": reasoning},  # vLLM/Qwen: reasoning pass on or off
+                "messages": [
+                    {"role": "system", "content": SYSTEM},
+                    {"role": "user", "content": f"{RULES}\n\nClips:\n{json.dumps(clips, indent=1)}"},
+                ],
+                "response_format": {"type": "json_schema", "json_schema": {"name": "edit_plan", "schema": SCHEMA}},
+            },
+            timeout,
+        )
+        try:
+            raw = json.loads(reply["choices"][0]["message"]["content"])
+            break
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            finish = (reply.get("choices") or [{}])[0].get("finish_reason")
+            if reasoning and think and finish == "length":
+                continue  # the reasoning pass ran out of tokens: ask again without it
+            raise AiError(f"the model did not return a usable plan (finish_reason={finish}): {reply!r:.200}") from exc
     if not isinstance(raw, dict):
         raise AiError("the model's plan was not a JSON object")
     plan = normalize_plan(raw, [c.number for c in timeline.clips])

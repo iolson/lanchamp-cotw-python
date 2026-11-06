@@ -43,6 +43,8 @@ class ClipPlan:
     speed: float = 0.5  # playback speed inside the slow windows
     kills: tuple[tuple[float, bool, bool], ...] = ()  # (seconds after src_start, headshot, special)
     detail: str = ""  # e.g. "4K (m4a1)"; context for people / the LLM, not shown on screen
+    map: str = ""  # e.g. "anubis"; clips of one map form a section
+    broll: bool = False  # empty-map footage that opens a section: no lower third or stat punch
 
 
 SLOW_BEFORE, SLOW_AFTER = 0.30, 0.45  # full slow motion runs from just before a kill to just after it
@@ -177,6 +179,10 @@ def load_report(path: Path) -> dict:
     return report
 
 
+def _map_slug(map_name: str) -> str:
+    return re.sub(r"^(de|cs|ar)_", "", map_name or "").lower()
+
+
 def _map_label(map_name: str) -> str:
     return re.sub(r"^(de|cs|ar)_", "", map_name or "").replace("_", " ").title()
 
@@ -284,7 +290,7 @@ def build_timeline(
                      score=float(best.get("score", 0)), src_start=t + lead, trimmed=trimmed,
                      src_len=src_len, src_max=src_max, min_src=min_src,
                      kills=tuple((k["t"] - lead, k["headshot"], k["special"]) for k in kl or []),
-                     detail=str(best.get("description") or ""))
+                     detail=str(best.get("description") or ""), map=_map_slug(report.get("map", "")))
         )
         t += seq_dur
         out += dur
@@ -375,14 +381,26 @@ def snap_cuts(timeline: Timeline, beats: list[float], *, offset: float, music_st
     past the footage). `offset` is when the first clip starts in the episode (the title card length)
     and `music_start` is when the track starts, so beat times can be placed on the episode clock.
     """
-    grid = [music_start + b for b in beats]
+    return snap_cuts_multi(timeline, [beats], [], offset=offset, music_start=music_start)[0]
+
+
+def snap_cuts_multi(timeline: Timeline, beats: list[list[float]], switches: list[int], *, offset: float,
+                    music_start: float) -> tuple[Timeline, list[float]]:
+    """`snap_cuts` for several songs: song k+1 starts with clip `switches[k]`, with its first beat on that
+    clip's start. Returns the timeline and where each song starts on the episode clock."""
+    starts = [music_start]
+    grid = [music_start + b for b in beats[0]]
     out: list[ClipPlan] = []
     t = 0.0
-    for clip in timeline.clips:
+    for i, clip in enumerate(timeline.clips):
+        at = offset + t
+        if len(starts) < len(beats) and i == switches[len(starts) - 1]:
+            nxt = beats[len(starts)]
+            starts.append(max(0.0, at - (nxt[0] if nxt else 0.0)))
+            grid = [starts[-1] + b for b in nxt]
         src_len = clip.src_len or clip.duration
         src_max = max(clip.src_max, src_len)
         min_src = min(clip.min_src or src_len, src_len)
-        at = offset + t
         lo = clip_length(min_src, clip.slow, clip.speed)
         hi = clip_length(src_max, clip.slow, clip.speed)
         want = at + clip.duration
@@ -395,7 +413,72 @@ def snap_cuts(timeline: Timeline, beats: list[float], *, offset: float, music_st
                            trimmed=clip.trimmed or new_src < clip.src_max - 0.05)
         out.append(replace(clip, start=t))
         t += clip.duration
+    return Timeline(out, t), starts
+
+
+def relayout(clips: list[ClipPlan]) -> Timeline:
+    """A timeline of `clips` laid end to end."""
+    out, t = [], 0.0
+    for c in clips:
+        out.append(replace(c, start=t))
+        t += c.duration
     return Timeline(out, t)
+
+
+def sections(timeline: Timeline) -> list[list[ClipPlan]]:
+    """Clips grouped by map. Clips keep their order inside a section; sections are ordered by where their
+    last clip sits, so with `--order score` the section holding the best clip comes last."""
+    groups: dict[str, list[tuple[int, ClipPlan]]] = {}
+    for i, c in enumerate(timeline.clips):
+        groups.setdefault(c.map, []).append((i, c))
+    return [[c for _, c in g] for g in sorted(groups.values(), key=lambda g: g[-1][0])]
+
+
+BROLL_NUMBER = 1000  # b-roll "clips" are numbered from here so they never clash with real clip numbers
+
+
+def add_broll(timeline: Timeline, footage: dict[str, list[tuple[int, float]]], seconds: float) -> Timeline:
+    """Group the clips into map sections and open each with a b-roll shot of that map.
+
+    `footage` maps a map name to its b-roll as (index of the source video, its length in seconds).
+    """
+    out: list[ClipPlan] = []
+    used: dict[str, int] = {}
+    for sec in sections(timeline):
+        files = footage.get(sec[0].map)
+        if files:
+            source, length = files[used.get(sec[0].map, 0) % len(files)]
+            used[sec[0].map] = used.get(sec[0].map, 0) + 1
+            shot = min(seconds, length)
+            out.append(ClipPlan(BROLL_NUMBER + len(out), 0.0, shot, "b-roll", "", sec[0].context, None,
+                                source=source, trimmed=True, src_len=shot, src_max=length,
+                                min_src=min(shot, 2.0), map=sec[0].map, broll=True))
+        out.extend(sec)
+    return relayout(out)
+
+
+def song_switches(timeline: Timeline, lengths: list[float], *, offset: float, start: float, overlap: float = 1.0,
+                  min_play: float = 20.0, max_early: float = 25.0) -> list[int]:
+    """Clip indexes where songs 2.. begin, as late as possible without the song before running out.
+
+    A song changes at the start of a section (its b-roll shot, or the first clip of a new map) when one falls
+    within `max_early` seconds of where the song ends; otherwise at the latest clip boundary that fits.
+    """
+    clips = timeline.clips
+    starts = {i for i, c in enumerate(clips) if i > 0 and (c.broll or c.map != clips[i - 1].map)}
+    out: list[int] = []
+    song_start = start
+    for length in lengths[:-1]:
+        want = song_start + length - overlap
+        ok = [(i, offset + clips[i].start) for i in range(1, len(clips))
+              if offset + clips[i].start <= want and offset + clips[i].start >= song_start + min_play
+              and i > (out[-1] if out else 0)]
+        if not ok:
+            break
+        near = [(i, t) for i, t in ok if i in starts and want - t <= max_early]
+        i, song_start = (near or ok)[-1]
+        out.append(i)
+    return out
 
 
 def select_slowmo_clips(timeline: Timeline, select: str | list[int] = "auto") -> list[int]:

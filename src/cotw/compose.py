@@ -62,6 +62,7 @@ class Options:
     music_volume: float = 0.25
     music_duration: float | None = None  # track length; the music plays once and ends on its own if it fits
     music_start: float | None = None  # seconds into the episode; None = right after the title card
+    tracks: tuple[tuple[Path, float, float], ...] = ()  # several songs: (file, start on the episode clock, length)
     music_fade_in: float = 1.5
     music_fade_out: float = 3.0
 
@@ -148,6 +149,9 @@ def _music_bed(g: _Graph, opts: Options, total: float, title: float) -> None:
 
     A track that ends before the episode does ends naturally; a longer one is cut with a fade-out.
     """
+    if len(opts.tracks) > 1:
+        _music_tracks(g, opts, total)
+        return
     start = title if opts.music_start is None else opts.music_start
     start = min(max(0.0, start), total)
     room = max(0.1, total - start)
@@ -164,6 +168,34 @@ def _music_bed(g: _Graph, opts: Options, total: float, title: float) -> None:
         f"afade=t=in:d={_num(min(opts.music_fade_in, length))},"
         f"adelay={int(start * 1000)}:all=1,apad=whole_dur={_num(total)}[mus]"
     )
+    g.chain("[agame]asplit=2[agame1][agame2]")
+    g.chain("[mus][agame2]sidechaincompress=threshold=0.03:ratio=6:attack=30:release=500[musd]")
+    g.chain("[agame1][musd]amix=inputs=2:duration=first:normalize=0[aout]")
+
+
+SONG_OVERLAP = 1.0  # seconds two songs overlap when the music changes
+
+
+def _music_tracks(g: _Graph, opts: Options, total: float) -> None:
+    """Several songs back to back (each crossfades into the next), ducked under the game audio."""
+    labels = []
+    for n, (path, start, seconds) in enumerate(opts.tracks):
+        last = n == len(opts.tracks) - 1
+        start = min(max(0.0, start), total)
+        end = min(start + seconds, total) if last else min(start + seconds, opts.tracks[n + 1][1] + SONG_OVERLAP)
+        length = max(0.1, end - start)
+        cut = not last or start + seconds > total
+        fade = min(opts.music_fade_out if last else SONG_OVERLAP, length)
+        tail = f"afade=t=out:st={_num(length - fade)}:d={_num(fade)}," if cut else ""
+        i = g.add_input("-i", str(path))
+        g.chain(
+            f"[{i}:a]aresample=48000,aformat=channel_layouts=stereo,volume={opts.music_volume},"
+            f"atrim=end={_num(length)},asetpts=PTS-STARTPTS,{tail}"
+            f"afade=t=in:d={_num(min(opts.music_fade_in if n == 0 else SONG_OVERLAP, length))},"
+            f"adelay={int(start * 1000)}:all=1,apad=whole_dur={_num(total)}[mus{n}]"
+        )
+        labels.append(f"[mus{n}]")
+    g.chain(f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:normalize=0[mus]")
     g.chain("[agame]asplit=2[agame1][agame2]")
     g.chain("[mus][agame2]sidechaincompress=threshold=0.03:ratio=6:attack=30:release=500[musd]")
     g.chain("[agame1][musd]amix=inputs=2:duration=first:normalize=0[aout]")
@@ -286,7 +318,7 @@ def build_args(
     total = (opts.title_seconds if assets.title and opts.title_seconds > 0 else 0.0) + main_dur
     if assets.end and opts.end_mode == "append" and opts.end_seconds > 0:
         total += opts.end_seconds
-    if opts.music:
+    if opts.music or opts.tracks:
         g.chain(f"{joined}concat=n={len(segments)}:v=1:a=1[vout][agame]")
         _music_bed(g, opts, total, title=opts.title_seconds if assets.title else 0.0)
     else:

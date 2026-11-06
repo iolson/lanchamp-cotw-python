@@ -83,7 +83,10 @@ cotw files --episode 1 -o output/cotw-ep01.mp4
 | `--slowmo-speed X` | Speed in the slowest part (default 0.5, from 120 fps footage that stays smooth at 60 fps) |
 | `--snap-cuts` | Move each cut onto the nearest beat of `--music` (`pip install -e '.[beats]'`) |
 | `--ai URL` / `--plan FILE` / `--ai-fast` | Let a local LLM suggest clip order and slow-motion clips, save/load the plan (see below) |
-| `--music-dir DIR` | Choose the track from a folder: with `--ai` the model picks the best fit from each track's length, tempo and energy curve (cached as `<track>.analysis.json`); otherwise the one closest in length to the video |
+| `--music-dir DIR` | Choose the track from a folder: with `--ai` the model picks the best fit from each track's length, tempo and energy curve (cached as `<track>.analysis.json`); otherwise the one closest in length to the video; if no single track covers the video, all of them are used, quietest first |
+| `--music FILE` (repeat) | Several songs: each next one starts at a new section (or the nearest clip cut) and crossfades with the one before |
+| `--sections map` | Group the clips by map: each map is a section; the section holding the best clip comes last |
+| `--broll DIR` / `--broll-seconds N` | Open each section with N seconds (default 4) of empty-map b-roll for that map, taken from the cs2-highlights b-roll exports under DIR (needs `--sections map`) |
 | `--fps N` | Output frame rate (default 60; 120 fps sources are just headroom for slow motion) |
 | `--channel NAME` | Handle on the end card (default `@LANChampGG`) |
 | `--lower-third-scale X` | Lower-third size (default 0.65; 1.0 is the original, larger plate) |
