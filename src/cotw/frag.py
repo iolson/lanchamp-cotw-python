@@ -22,6 +22,7 @@ from cotw.beats import BeatError, analyze_track, detect_beats
 from cotw.compose import (
     CUT_FADE, SLOW_AUDIO, FfmpegError, MediaInfo, _Graph, _num, audio_duration, find_ffmpeg, probe, run_ffmpeg,
 )
+from cotw import transitions as fx
 from cotw.graphics import H, W
 from cotw.pov import bad_ranges, good_islands, scan
 from cotw.plan import (
@@ -81,7 +82,7 @@ class Look:
     quality: int = 18
     letterbox: float | None = None  # e.g. 2.35 for cinematic bars; None = full frame
     grade: str = "none"  # none | vivid | warm
-    transitions: str = "auto"  # none | auto | flash | ghost | whip
+    transitions: str = "auto"  # none | auto | flash | ghost | whip | random | a kind from transitions.KINDS
     seed: int | None = None
 
 
@@ -316,9 +317,13 @@ def arrange_bursts(bursts: list[Burst], grid: list[float], limit: float, order: 
 
 def plan_transitions(segs: list[Seg], mode: str, seed: int | None) -> list[tuple[float, str]]:
     """(time, kind) for each cut between segments. `auto` mixes the kinds, leaves some cuts clean and
-    puts a flash on the cut into the finale of a big (4+ kill) clip."""
+    puts a flash on the cut into the finale of a big (4+ kill) clip. `random` or a kind from
+    transitions.KINDS delegates to the shared module; build-up cuts stay clean either way."""
     if mode == "none":
         return []
+    if mode == "random" or mode in fx.KINDS:
+        cuts = [s.start for s in segs[1:] if s.burst.kills]
+        return fx.plan_transitions(cuts, mode, seed if seed is not None else 7)
     rng = random.Random(seed if seed is not None else 7)
     out = []
     for s in segs[1:]:
@@ -412,6 +417,7 @@ def build_args(mains: list[tuple[Path, MediaInfo]], segs: list[Seg], tracks: lis
     flash_cuts = [t for t, kind in cuts if kind == "flash"]
     ghost_cuts = [t for t, kind in cuts if kind == "ghost"]
     whip_cuts = [t for t, kind in cuts if kind == "whip"]
+    new_cuts = [(t, kind) for t, kind in cuts if kind in fx.KINDS]
 
     steps: list[str] = []  # filters applied in order to the picture
     if look.effects:
@@ -441,6 +447,8 @@ def build_args(mains: list[tuple[Path, MediaInfo]], segs: list[Seg], tracks: lis
         g.chain(f"[gd]tpad=start_mode=clone:start_duration={GHOST_DELAY}[gdd]")
         g.chain(f"[gm][gdd]blend=all_expr='A*(1-({w}))+B*({w})':shortest=1[vgh]")
         cur = "vgh"
+    if new_cuts:
+        cur = fx.add_transitions(g, cur, new_cuts, width=info.width, height=info.height)
     if look.letterbox:
         bar = round(info.height * (1 - (16 / 9) / look.letterbox) / 2)
         if bar > 0:
@@ -532,9 +540,10 @@ def track_labels(ffmpeg: Path, track: Path) -> tuple[str, str]:
 @click.option("--letterbox-ratio", type=float, default=2.35, show_default=True)
 @click.option("--grade", type=click.Choice(["none", "vivid", "warm"]), default="none", show_default=True,
               help="Colour grade: vivid (punchy saturation) or warm.")
-@click.option("--transitions", type=click.Choice(["auto", "none", "flash", "ghost", "whip"]), default="auto",
-              show_default=True, help="Cut transitions: white flash, ghost echo of the previous shot, whip blur; "
-              "auto mixes them and leaves some cuts clean.")
+@click.option("--transitions", type=click.Choice(["auto", "none", "flash", "ghost", "whip", "random", *fx.KINDS]),
+              default="auto", show_default=True, help="Cut transitions: white flash, ghost echo of the previous "
+              "shot, whip blur; auto mixes them and leaves some cuts clean; random or one of the shared looks "
+              "(film-burn, no-signal, glitch, old-film, grunge, pixel, anamorphic) picks among those.")
 @click.option("--sync", type=click.Choice(["loose", "tight"]), default="loose", show_default=True,
               help="loose: cuts may also land on half beats (hero kills always on a beat); tight: beats only.")
 @click.option("--pace", type=click.Choice(["auto", "flat"]), default="auto", show_default=True,

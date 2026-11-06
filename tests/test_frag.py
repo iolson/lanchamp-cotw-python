@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from cotw import frag
+from cotw import transitions as fx
 from cotw.plan import ClipPlan
 
 GRID = [0.0] + [0.28 + i * 0.65 for i in range(200)]
@@ -100,6 +101,30 @@ def test_build_args_has_the_optional_looks_only_when_asked():
     fancy = g(frag.Look(letterbox=2.35, grade="vivid", transitions="ghost"))
     assert "drawbox=x=0:y=0:w=iw:h=131" in fancy and "colorbalance" in fancy and "blend=all_expr" in fancy
     assert "gblur" in g(frag.Look(transitions="whip")) and "gblur" not in plain
+
+
+def test_shared_kinds_plan_only_at_cuts_with_kills():
+    segs = _place(frag.bursts_from([_clip(1), _clip(2)]), [_track()], True)
+    planned = frag.plan_transitions(segs, "glitch", 1)
+    assert planned and all(k == "glitch" for _, k in planned)
+    assert [t for t, _ in planned] == [s.start for s in segs[1:] if s.burst.kills]
+
+
+def test_shared_random_plan_is_deterministic_for_a_seed():
+    segs = _place(frag.bursts_from([_clip(1), _clip(2)]), [_track()], True)
+    assert frag.plan_transitions(segs, "random", 5) == frag.plan_transitions(segs, "random", 5)
+    assert all(k in fx.KINDS for _, k in frag.plan_transitions(segs, "random", 5))
+
+
+def test_build_args_adds_the_shared_transition_chains():
+    from fractions import Fraction
+    from cotw.compose import MediaInfo
+    mains = [(Path("a.mp4"), MediaInfo(1920, 1080, Fraction(120), 100.0, True))]
+    segs = _place(frag.bursts_from([_clip(1), _clip(2)]), [_track()], True)
+    args = frag.build_args(mains, segs, [_track()], frag.Look(transitions="pixel"), Path("o.mp4"))
+    graph = args[args.index("-filter_complex") + 1]
+    assert "trunc(iw/8)" in graph and "scale=1920:1080:flags=neighbor" in graph
+    assert "[vtr1]" in graph and "[vtr3]format=yuv420p[vout]" in graph
 
 
 def test_effect_expressions_cannot_overflow_for_late_kills():
