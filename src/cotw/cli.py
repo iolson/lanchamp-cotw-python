@@ -12,6 +12,7 @@ from pathlib import Path
 import click
 
 from cotw import graphics
+from cotw import transitions as fx
 from cotw.compose import (
     Assets,
     FfmpegError,
@@ -188,6 +189,9 @@ def _load_broll(ffmpeg: Path, folder: Path, mains: list) -> dict[str, list[tuple
                    "all, or clip numbers like 3,5.")
 @click.option("--slowmo-speed", type=click.FloatRange(0.5, 0.95), default=0.5, show_default=True,
               help="Playback speed inside slow motion (0.5 is smooth from a 120 fps source at 60 fps output).")
+@click.option("--transitions", type=click.Choice(["none", "random", *fx.KINDS]), default="none", show_default=True,
+              help="Cut effects on the joins between clips: film burn, TV no-signal, RGB glitch, sepia old film, "
+                   "grunge, pixelate and anamorphic flare; random picks a seeded look per cut.")
 @click.option("--snap-cuts", "snap_cuts_on", is_flag=True,
               help="Move each cut onto the nearest beat of --music (needs librosa).")
 @click.option("--music", "music_files", multiple=True, type=click.Path(exists=True, dir_okay=False, path_type=Path),
@@ -231,7 +235,7 @@ def _load_broll(ffmpeg: Path, folder: Path, mains: list) -> dict[str, list[tuple
 def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None, episode: int, week: str, featuring: str,
          league: str, channel: str, next_up: str, team: str, names_path: Path | None, title_style: str, title_seconds: float,
          ai_url: str | None, ai_model: str | None, ai_fast: bool, plan_path: Path | None,
-         kill_padding: float | None, slowmo: str, slowmo_clips: str, slowmo_speed: float, snap_cuts_on: bool, music_files: tuple[Path, ...], music_dir: Path | None, sections_by: str, broll_dir: Path | None,
+         kill_padding: float | None, slowmo: str, slowmo_clips: str, slowmo_speed: float, transitions: str, snap_cuts_on: bool, music_files: tuple[Path, ...], music_dir: Path | None, sections_by: str, broll_dir: Path | None,
          broll_seconds: float, music_volume: float, music_start: float | None,
          order: str, reverse: bool, seed: int | None, pick: str | None, skip: str | None,
          end_seconds: float, lower_third_seconds: float, lower_third_scale: float, end_mode: str, no_title: bool, no_bug: bool, no_lower_thirds: bool, no_punch: bool,
@@ -347,13 +351,21 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
         slow = f"  slow-mo x{len(c.slow)}" if c.slow else ""
         click.echo(f"  #{c.number:<2} {c.start:7.1f}s +{c.duration:5.1f}s  {c.player} · {c.stat}{punch}{slow}")
 
+    # Cut effects on the final timeline; a window must not reach before 0, so early cuts stay clean.
+    planned = fx.plan_transitions([c.start for c in timeline.clips[1:] if c.start >= 0.35],
+                                  transitions, seed if seed is not None else 7)
+    if transitions != "none":
+        kinds = ", ".join(sorted({k for _, k in planned})) or "none"
+        click.echo(f"Transitions: {len(planned)} cuts ({kinds})")
+
     meta = graphics.EpisodeMeta(episode, week, featuring, league, channel, next_up)
     opts = Options(title_seconds=title_seconds, end_seconds=end_seconds, lower_third_seconds=lower_third_seconds,
                    end_mode="append" if end_mode == "off" else end_mode, encoder=encoder, quality=quality, fps=fps,
                    music=songs[0] if len(songs) == 1 else None, music_volume=music_volume,
                    music_start=music_start if len(songs) <= 1 else None,
                    music_duration=song_len[0] if len(songs) == 1 else None,
-                   tracks=tuple(zip(songs, song_starts, song_len)) if len(songs) > 1 else ())
+                   tracks=tuple(zip(songs, song_starts, song_len)) if len(songs) > 1 else (),
+                   transitions=tuple(planned))
 
     keep = graphics_only is not None
     work = graphics_only or Path(tempfile.mkdtemp(prefix="cotw-"))

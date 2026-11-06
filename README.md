@@ -81,6 +81,7 @@ cotw files --episode 1 -o output/cotw-ep01.mp4
 | `--slowmo last\|special\|headshots\|all` | Slow motion around kills, eased in and out (off by default). `last` = each clip's final kill; `special`/`headshots` add those kills; `all` slows every kill. Needs 120 fps sources |
 | `--slowmo-clips auto\|all\|3,5` | Which clips get it (default `auto`: signature clips, i.e. clutch/ace/4K, best first, at most a third of the episode) |
 | `--slowmo-speed X` | Speed in the slowest part (default 0.5, from 120 fps footage that stays smooth at 60 fps) |
+| `--transitions none\|random\|<look>` | Cut effects on the joins between clips: one of the seven shared looks below, or `random` for a seeded mix (default `none`) |
 | `--snap-cuts` | Move each cut onto the nearest beat of `--music` (`pip install -e '.[beats]'`) |
 | `--ai URL` / `--plan FILE` / `--ai-fast` | Let a local LLM suggest clip order and slow-motion clips, save/load the plan (see below) |
 | `--music-dir DIR` | Choose the track from a folder: with `--ai` the model picks the best fit from each track's length, tempo and energy curve (cached as `<track>.analysis.json`); otherwise the one closest in length to the video; if no single track covers the video, all of them are used, quietest first |
@@ -169,9 +170,10 @@ cotw-frag files --player fuzzyhat --music "files/song.mp3"      # only that play
 - **Eased slow motion** on the hero kill of each clip's final burst when the clip has 3+ kills
   (`--slowmo auto|all|none`, tape-style audio as above).
 - **Effects** on kills: zoom punch, plus screen shake and a flash on hero kills (`--no-effects` to skip).
-- **Transitions** at the cuts (`--transitions auto|none|flash|ghost|whip`): a white flash, a fading
+- **Transitions** at the cuts (`--transitions auto|none|flash|ghost|whip|random|<look>`): a white flash, a fading
   ghost echo of the previous shot, or a horizontal whip blur. `auto` mixes them, leaves about a third
-  of the cuts clean, and flashes into the finale of big (4+ kill) clips.
+  of the cuts clean, and flashes into the finale of big (4+ kill) clips. `random` or one of the seven
+  shared looks below picks among those instead (build-up cuts stay clean).
 - **Optional looks**, both off by default: `--grade vivid|warm` (punchy saturation / warm tint) and
   `--letterbox` (cinematic bars, `--letterbox-ratio 2.35`).
 - **Looser sync** (`--sync loose`, the default): cuts may also land on half beats while hero kills
@@ -190,6 +192,22 @@ cotw-frag files --player fuzzyhat --music "files/song.mp3"      # only that play
 - The output file name is `<name> - <track>.mp4`; the track comes from the file's tags or an
   `Artist - Title.mp3` file name (`--name` / `--track-name` override). The game audio is mixed under the music (`--game-volume`, `--music-volume`).
 - Output is 60 fps from the 120 fps sources, like `cotw`. `--max-seconds` caps the length (for shorts).
+
+## Cut transition looks
+
+Both commands share seven FFmpeg-only looks (`cotw --transitions`, `cotw-frag --transitions`); each is a
+short effect centred on the cut, never changing the clip length or frame size. `random` picks a seeded
+look per cut without repeating the same one twice in a row.
+
+| Look | Effect |
+| --- | --- |
+| `film-burn` | Warm light leak and grain swelling into the cut, like a burned frame |
+| `no-signal` | TV static, rolling bar and desaturation over the cut |
+| `glitch` | RGB channel shifts, contrast jump and a frame jitter |
+| `old-film` | Sepia tone, flicker, grain and vignette |
+| `grunge` | High-contrast bleach, heavy grain and shake |
+| `pixel` | Mosaic pixelation in three steps into the cut |
+| `anamorphic` | Horizontal anamorphic bloom flaring up through the cut |
 
 ## Player names and teams
 

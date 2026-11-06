@@ -135,3 +135,62 @@ def test_slow_motion_pieces_are_retimed_with_tape_audio():
     assert "setpts=(PTS-STARTPTS)/0.5,fps=60" in g
     assert "asetrate=48000*0.5,aresample=48000,lowpass=f=3200" in g and "atempo" not in g
     assert g.count("asetrate=") > 1 and "concat=n=11:v=1:a=1[v0][amain]" in g  # eased in and out in steps
+
+
+def test_transitions_chain_under_the_graphics():
+    opts = Options(transitions=((10.0, "glitch"),))
+    g = _graph(build_args(MAIN, TL, _assets(), opts, Path("out.mp4")))
+    assert "[v0]rgbashift" in g and "rgbashift=rh=6:bh=-6" in g  # the glitch stages, off the concat
+    assert "[vtr1][bug]overlay" in g  # the bug sits on top of the transitions
+    assert "[v4]format=yuv420p[vmain]" in g  # bug + two lower thirds + punch, all on top of vtr1
+
+
+def test_pixel_transitions_use_the_video_size():
+    opts = Options(transitions=((10.0, "pixel"),))
+    g = _graph(build_args(MAIN, TL, _assets(lower_thirds={}, punches={}), opts, Path("out.mp4")))
+    assert "scale=trunc(iw/8):trunc(ih/8):flags=neighbor,scale=1920:1080:flags=neighbor" in g
+
+
+def test_no_transitions_leaves_the_graph_alone():
+    assert "vtr" not in _graph(build_args(MAIN, TL, _assets(), Options(), Path("out.mp4")))
+
+
+def _dry_run(tmp_path, *extra):
+    """Run the `cotw` command with --dry-run over a three-clip report; returns (output, filter graph)."""
+    import json
+    from unittest import mock
+
+    from click.testing import CliRunner
+    from cotw.cli import main
+
+    report = {
+        "map": "de_mirage",
+        "sequences": [
+            {"number": n, "round": n, "duration_seconds": d,
+             "moments": [{"player": f"p{n}", "kills": 3, "description": "3K", "score": n, "clutch": None}]}
+            for n, d in ((1, 10.0), (2, 12.0), (3, 11.0))
+        ],
+    }
+    video = tmp_path / "ep.mp4"
+    video.write_bytes(b"")
+    (tmp_path / "ep.json").write_text(json.dumps(report))
+    info = MediaInfo(1920, 1080, Fraction(60), 33.0, True)
+    with mock.patch("cotw.cli.find_ffmpeg", return_value=Path("ffmpeg")), mock.patch("cotw.cli.probe", return_value=info):
+        res = CliRunner().invoke(
+            main, [str(video), "--episode", "1", "--no-title", "--no-bug", "--dry-run", *extra],
+            catch_exceptions=False,
+        )
+    assert res.exit_code == 0, res.output
+    graph = res.output.split("-filter_complex ")[1].split(" -map")[0]
+    return res.output, graph
+
+
+def test_cli_transitions_dry_run_mentions_the_plan(tmp_path):
+    out, graph = _dry_run(tmp_path, "--transitions", "glitch")
+    assert "Transitions: 2 cuts (glitch)" in out  # cuts at 10 s and 22 s
+    assert "[v0]rgbashift" in graph and "[vtr1]" in graph and "[vtr2]" in graph
+
+
+def test_cli_without_transitions_has_no_transition_chain(tmp_path):
+    out, graph = _dry_run(tmp_path)
+    assert "Transitions" not in out and "vtr" not in graph

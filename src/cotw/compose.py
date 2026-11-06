@@ -65,6 +65,7 @@ class Options:
     tracks: tuple[tuple[Path, float, float], ...] = ()  # several songs: (file, start on the episode clock, length)
     music_fade_in: float = 1.5
     music_fade_out: float = 3.0
+    transitions: tuple[tuple[float, str], ...] = ()  # (cut time on the video clock, kind) from transitions.py
 
 
 def find_ffmpeg(explicit: Path | None = None) -> Path:
@@ -209,6 +210,8 @@ def build_args(
     output: Path,
 ) -> list[str]:
     g = _Graph()
+    from cotw.transitions import add_transitions  # transitions imports this module: import it on use
+
     info = mains[0][1]  # the first video sets the output size and frame rate
     fps = str(opts.fps)
     size = f"{info.width}:{info.height}"
@@ -248,6 +251,8 @@ def build_args(
             pieces.append(f"[mv{tag}][ma{tag}]")
     g.chain(f"{''.join(pieces)}concat=n={len(pieces)}:v=1:a=1[v0][amain]")
     cur, step = "v0", 0
+    if opts.transitions:  # cut effects under the graphics; vtr labels cannot clash with v{n}
+        cur = add_transitions(g, "v0", list(opts.transitions), width=info.width, height=info.height)
 
     def overlay(top: str, enable: tuple[float, float] | None, x: str = "0") -> None:
         nonlocal cur, step
