@@ -70,11 +70,10 @@ def _between(a: float, b: float) -> str:
 
 
 def _ramp(t: float, before: float, after: float, decay: float = 10.0, clock: str = "t") -> str:
-    """0 -> 1 linearly over the window before the cut, then exp decay after it."""
-    a, b = _num(t), _num(t - before)
-    rise = f"({clock}-{b})/{_num(before)}"
-    return (f"lt({clock},{b})*{rise}"
-            f"+gte({clock},{b})*lt({clock},{a})*exp(-{_num(decay)}*max(0,{clock}-{b}))")
+    """0 outside the window; inside it 0 -> 1 linearly up to the cut, then exp decay until it ends."""
+    start, cut, end = _num(t - before), _num(t), _num(t + after)
+    return (f"(between({clock},{start},{cut})*({clock}-{start})/{_num(before)}"
+            f"+gt({clock},{cut})*lt({clock},{end})*exp(-{_num(decay)}*max(0,{clock}-{cut})))")
 
 
 def _stage(g: _Graph, prev: str, nxt: str, filters: list[str]) -> str:
@@ -113,8 +112,7 @@ def _glitch(g: _Graph, prev: str, label: str, t: float) -> str:
                   [f"rgbashift={s}:enable='{_between(a, b)}'" for s, (a, b) in zip(shifts, thirds)] + [
         f"noise=alls=35:allf=t+u:enable='{win}'",
         f"eq=contrast=1.3:eval=frame:enable='{win}'",
-        f"crop=iw-16:ih-8:x='8+10*sin(2*PI*t*47)':y='4+3*sin(2*PI*t*29)',"
-        f"pad=iw+16:ih+8:8:4:color=black",
+        f"rgbashift=rv=3:bv=-3:gh=4:edge=wrap:enable='{_between(thirds[1][0], thirds[2][1])}'",
     ])
 
 
@@ -136,8 +134,7 @@ def _grunge(g: _Graph, prev: str, label: str, t: float) -> str:
         f"eq=contrast=1.45:saturation=0.55:brightness=-0.05:eval=frame:enable='{win}'",
         f"noise=alls=45:allf=t+u:enable='{win}'",
         f"unsharp=5:5:1.2:enable='{win}'",
-        f"crop=iw-8:ih-8:x='4+4*sin(2*PI*t*37)':y='4+3*sin(2*PI*t*29)',"
-        f"pad=iw+8:ih+8:4:4:color=black",
+        f"rgbashift=rh=2:bh=-2:edge=wrap:enable='{win}'",
     ])
 
 

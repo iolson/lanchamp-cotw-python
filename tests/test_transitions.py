@@ -125,3 +125,18 @@ def test_every_kind_keeps_the_stream_length(kind):
     result = _run_ffmpeg([(1.5, kind)], 3)
     assert result.returncode == 0, result.stderr
     assert "frame=   90" in result.stderr.replace("\r", "\n"), result.stderr[-300:]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_footage_far_from_a_cut_is_untouched(kind):
+    ffmpeg = find_ffmpeg()
+    g = _Graph()
+    out = add_transitions(g, "0:v", [(80.0, kind)], width=320, height=180)
+    chains = ";".join(["[0:v]split[ref][in]", *(c.replace("[0:v]", "[in]") for c in g.chains),
+                       f"[ref]trim=duration=2,setpts=PTS-STARTPTS[r];[{out}]trim=duration=2,setpts=PTS-STARTPTS[o]",
+                       "[r][o]psnr"])
+    res = subprocess.run([str(ffmpeg), "-hide_banner", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=3",
+                          "-filter_complex", chains, "-f", "null", "-"], capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr[-400:]
+    avg = res.stderr.rsplit("average:", 1)[1].split()[0]
+    assert avg == "inf" or float(avg) > 45, res.stderr[-300:]
