@@ -35,6 +35,7 @@ class EpisodeMeta:
     league: str = ""
     channel: str = "@LANChampGG"
     next_up: str = ""
+    submit_url: str = ""  # shown on the end card as "Submit your clip"
 
     @property
     def ep_tag(self) -> str:
@@ -95,7 +96,8 @@ def corner_bug(meta: EpisodeMeta) -> Image.Image:
     return c.finish()
 
 
-def lower_third(player: str, team: str, stat: str, context: str, scale: float = 0.65) -> Image.Image:
+def lower_third(player: str, team: str, stat: str, context: str, scale: float = 0.65, opponent: str = "",
+                division: str = "") -> Image.Image:
     """Player name plate (transparent). The corner bug is a separate overlay.
 
     `scale` shrinks the plate (type, padding and box) while its bottom-left corner stays put.
@@ -107,7 +109,8 @@ def lower_third(player: str, team: str, stat: str, context: str, scale: float = 
     name_size = round(66 * k)
     name_w = c.measure(player or "player", "display", 700, name_size)
 
-    parts = [p for p in (team, stat, context) if p]
+    matchup = f"{team} vs {opponent}" if team and opponent else (f"vs {opponent}" if opponent else team)
+    parts = [p for p in (matchup, stat, context, division) if p]
     segs: list[tuple[str, str]] = []
     for i, p in enumerate(parts):
         if i:
@@ -127,6 +130,29 @@ def lower_third(player: str, team: str, stat: str, context: str, scale: float = 
     for t, col in segs:
         c.text(t, sx, box_top + 128 * k, family="mono", weight=500, size=sub_size, ls=sub_ls, fill=color(col))
         sx += c.measure(t, "mono", 500, sub_size, sub_ls)
+    return c.finish()
+
+
+def rank_plate(rank: int) -> Image.Image:
+    """Big countdown number for the start of a clip (transparent), right of centre."""
+    c = Canvas()
+    x = W - 150
+    c.text("No.", x, 380, family="mono", weight=600, size=34, ls=14, fill=color(WHITE, 0.9), align="right", upper=True)
+    c.text(f"#{rank}", x, 640, family="display", weight=700, size=int(c.fit_size(f"#{rank}", "display", 700, 340, 0, 560)),
+           fill=color(GOLD), align="right", glow=(color(GOLD, 0.55), 40))
+    c.rect(x - 220, 676, 220, 8, color(CYAN))
+    return c.finish()
+
+
+def rank_badge(rank: int, total: int) -> Image.Image:
+    """Small persistent badge under the corner bug (transparent): `#7 / 10`."""
+    c = Canvas()
+    bx, by, w, h = 72, 170, 190, 54
+    c.rect(bx, by, w, h, color("#080C12", 0.78), radius=12)
+    c.outline(bx, by, w, h, color("#FFFFFF", 0.18), 1.5, radius=12)
+    c.text(f"#{rank}", bx + 18, by + 38, family="display", weight=700, size=32, fill=color(GOLD))
+    c.text(f"of {total}", bx + 18 + c.measure(f"#{rank}", "display", 700, 32) + 12, by + 36, family="mono", weight=500,
+           size=18, ls=3, fill=color(MUTED), upper=True)
     return c.finish()
 
 
@@ -189,6 +215,9 @@ def end_card(meta: EpisodeMeta) -> Image.Image:
         top = 700 + (bh - tri_h) / 2
         lay.polygon([(tx, top), (tx + tri_w, top + tri_h / 2), (tx, top + tri_h)], color("#041018"))
     c.text("SUBSCRIBE", tx + tri_w + tri_gap, 700 + 54, family="display", weight=700, size=38, ls=1, fill=color("#041018"))
+    if meta.submit_url:
+        c.text(f"Submit your clip · {meta.submit_url}", cx, 800, family="mono", weight=500, size=26, ls=5,
+               fill=color(WHITE), align="center", upper=True)
     if meta.next_up:
         c.text("Next up", W - 96, H - 150, family="mono", weight=500, size=22, ls=5, fill=color(MUTED2), align="right", upper=True)
         c.text(meta.next_up, W - 96, H - 104, family="display", weight=700, size=46, fill=color(WHITE), align="right", upper=True)

@@ -44,6 +44,8 @@ class Assets:
     end: Path | None = None
     lower_thirds: dict[int, Path] = field(default_factory=dict)  # clip number -> PNG
     punches: dict[int, Path] = field(default_factory=dict)  # clip number -> dir of %03d.png frames
+    rank_plates: dict[int, Path] = field(default_factory=dict)  # countdown: clip number -> big "#7" PNG
+    rank_badges: dict[int, Path] = field(default_factory=dict)  # countdown: clip number -> "#7 of 10" PNG
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,7 @@ class Options:
     lower_third_delay: float = 1.0
     lower_third_seconds: float = 7.0
     punch_delay: float = 0.3
+    rank_seconds: float = 1.8  # how long the big countdown number shows; the stat punch waits for it
     punch_fps: int = 30
     encoder: str = "libx264"  # or "h264_nvenc"
     quality: int = 18  # CRF / CQ
@@ -66,6 +69,11 @@ class Options:
     music_fade_in: float = 1.5
     music_fade_out: float = 3.0
     transitions: tuple[tuple[float, str], ...] = ()  # (cut time on the video clock, kind) from transitions.py
+    cold: tuple[int, float, float] | None = None  # cold open before the title card: (source index, source start, seconds)
+
+    @property
+    def cold_seconds(self) -> float:
+        return self.cold[2] if self.cold else 0.0
 
 
 def find_ffmpeg(explicit: Path | None = None) -> Path:
@@ -279,8 +287,20 @@ def build_args(
             )
             slide = f"-pow(1-min(1,max(0,(t-{_num(s)})/{LT_SLIDE})),3)*{LT_SLIDE_PX}"
             overlay(f"lt{clip.number}", (s, s + d), x=f"'{slide}'")
+        if clip.number in assets.rank_badges:
+            i = loop_png(assets.rank_badges[clip.number], clip.duration)
+            g.chain(f"[{i}:v]{rgba},setpts=PTS+{_num(start)}/TB[rb{clip.number}]")
+            overlay(f"rb{clip.number}", (start, start + clip.duration))
+        if clip.number in assets.rank_plates:
+            s, d = start + 0.2, min(opts.rank_seconds, max(0.5, clip.duration - 0.2))
+            i = loop_png(assets.rank_plates[clip.number], d)
+            g.chain(
+                f"[{i}:v]{rgba},fade=t=in:st=0:d={LT_FADE}:alpha=1,"
+                f"fade=t=out:st={_num(d - LT_FADE)}:d={LT_FADE}:alpha=1,setpts=PTS+{_num(s)}/TB[rp{clip.number}]"
+            )
+            overlay(f"rp{clip.number}", (s, s + d))
         if clip.number in assets.punches:
-            s = start + opts.punch_delay
+            s = start + opts.punch_delay + (opts.rank_seconds if clip.number in assets.rank_plates else 0.0)
             i = g.add_input("-framerate", str(opts.punch_fps), "-i", str(assets.punches[clip.number] / "%03d.png"))
             g.chain(
                 f"[{i}:v]{rgba},fade=t=out:st={_num(STAT_TOTAL - PUNCH_FADE_OUT)}:d={PUNCH_FADE_OUT}:alpha=1,"
@@ -299,6 +319,17 @@ def build_args(
 
     # Title + main + (appended) end card, joined with the concat filter.
     segments: list[tuple[str, str]] = []
+    if opts.cold:  # a teaser of the best moment before the intro: game audio only, a short fade at each end
+        src, st, d = opts.cold
+        path, mi = mains[src]
+        idx = g.add_input("-ss", _num(st), "-t", _num(d), "-i", str(path))
+        g.chain(
+            f"[{idx}:v]fps={fps},scale={size},setsar=1,format=yuv420p,"
+            f"fade=t=in:st=0:d=0.15,fade=t=out:st={_num(d - 0.2)}:d=0.2[vcold]"
+        )
+        audio = f"[{idx}:a:0]aresample=48000,aformat=channel_layouts=stereo" if mi.has_audio else f"[{silence(d)}:a]anull"
+        g.chain(f"{audio},afade=t=in:d=0.15,afade=t=out:st={_num(d - 0.2)}:d=0.2[acold]")
+        segments.append(("vcold", "acold"))
     if assets.title and opts.title_seconds > 0:
         d = opts.title_seconds
         i, a = loop_png(assets.title, d), silence(d)
@@ -320,12 +351,14 @@ def build_args(
         segments.append(("vend", "aend"))
 
     joined = "".join(f"[{v}][{a}]" for v, a in segments)
-    total = (opts.title_seconds if assets.title and opts.title_seconds > 0 else 0.0) + main_dur
+    title_len = opts.title_seconds if assets.title and opts.title_seconds > 0 else 0.0
+    total = opts.cold_seconds + title_len + main_dur
     if assets.end and opts.end_mode == "append" and opts.end_seconds > 0:
         total += opts.end_seconds
     if opts.music or opts.tracks:
         g.chain(f"{joined}concat=n={len(segments)}:v=1:a=1[vout][agame]")
-        _music_bed(g, opts, total, title=opts.title_seconds if assets.title else 0.0)
+        # default music start: with a cold open, the intro card; otherwise right after the title card
+        _music_bed(g, opts, total, title=opts.cold_seconds or (opts.title_seconds if assets.title else 0.0))
     else:
         g.chain(f"{joined}concat=n={len(segments)}:v=1:a=1[vout][aout]")
 

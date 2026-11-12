@@ -24,7 +24,9 @@ from cotw.compose import (
     run_ffmpeg,
 )
 from cotw.plan import PlanError, Timeline, build_timeline, load_names, load_report, merge_timelines
-from cotw.ai import AiError, load_plan, suggest_music, suggest_plan
+from cotw import episode as ep
+from cotw import thumbnail as thumb
+from cotw.ai import AiError, load_plan, suggest_copy, suggest_music, suggest_plan
 from cotw.beats import BeatError, analyze_track, detect_beats
 from cotw.plan import (
     ORDERS, _map_slug, SLOWMO_MODES, add_broll, apply_slowmo, arrange, parse_numbers, relayout, sections, snap_cuts_multi,
@@ -59,8 +61,13 @@ def render_assets(
 
     for clip in timeline.clips:
         if lower_thirds and not clip.broll:
-            img = graphics.lower_third(clip.player, clip.team or team, clip.stat, clip.context, lt_scale)
+            img = graphics.lower_third(clip.player, clip.team or team, clip.stat, clip.context, lt_scale,
+                                       opponent=clip.opponent, division=clip.division)
             assets.lower_thirds[clip.number] = save(img, f"lower_third_{clip.number:02d}.png")
+        if clip.rank:
+            assets.rank_plates[clip.number] = save(graphics.rank_plate(clip.rank), f"rank_{clip.number:02d}.png")
+            assets.rank_badges[clip.number] = save(graphics.rank_badge(clip.rank, len(timeline.clips)),
+                                                   f"rankbadge_{clip.number:02d}.png")
         if punches and clip.punch:
             frames = work / f"punch_{clip.number:02d}"
             frames.mkdir(exist_ok=True)
@@ -74,6 +81,11 @@ def render_assets(
                 )
             assets.punches[clip.number] = frames
     return assets
+
+
+def ctx_source(ctx: click.Context, name: str) -> bool:
+    """True when the option still has its default value (the user did not pass it)."""
+    return ctx.get_parameter_source(name) == click.core.ParameterSource.DEFAULT
 
 
 def _save(img, path: Path) -> Path:
@@ -150,6 +162,27 @@ def _load_broll(ffmpeg: Path, folder: Path, mains: list) -> dict[str, list[tuple
     return footage
 
 
+def _write_thumbnails(ffmpeg: Path, mains: list, timeline: Timeline, meta: graphics.EpisodeMeta, path: Path,
+                      count: int, text: str | None, preferred: list[int]) -> None:
+    """Hero thumbnails from the best clips: `path` for the first, `<stem>-2`, `<stem>-3` ... for the others."""
+    by_number = {c.number: c for c in timeline.clips if not c.broll}
+    ranked = sorted(by_number.values(), key=lambda c: -c.score)
+    picks = [by_number[n] for n in preferred if n in by_number]
+    picks += [c for c in ranked if c not in picks]
+    for i, clip in enumerate(picks[:count]):
+        ks = sorted(t for t, _, _ in clip.kills)
+        at = clip.src_start + (ks[-1] if ks else (clip.src_len or clip.duration) / 2) - 0.05
+        out = path if i == 0 else path.with_name(f"{path.stem}-{i + 1}{path.suffix}")
+        try:
+            frame = thumb.extract_frame(ffmpeg, mains[clip.source][0], at)
+        except FfmpegError as exc:
+            click.echo(f"warning: thumbnail for clip #{clip.number} skipped: {exc}", err=True)
+            continue
+        label = text if (text and i == 0) else ep.callout(clip)
+        thumb.save(thumb.render(frame, meta, label, clip.player, clip.team), out)
+        click.echo(f"Thumbnail {out}: clip #{clip.number} {clip.player} \"{label}\"")
+
+
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.argument("videos", nargs=-1, required=True, type=click.Path(exists=True, path_type=Path))
 @click.option("--report", "report_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
@@ -218,6 +251,21 @@ def _load_broll(ffmpeg: Path, folder: Path, mains: list) -> dict[str, list[tuple
               "but it follows the editing rules less reliably.")
 @click.option("--plan", "plan_path", type=click.Path(dir_okay=False, path_type=Path),
               help="Edit plan JSON: loaded if it exists, otherwise written after --ai asks the model.")
+@click.option("--structure", type=click.Choice(["none", "paced", "countdown"]), default="none", show_default=True,
+              help="paced: cold open teasing the best clip, fast intro, a strong opening group, a varied middle and "
+                   "the biggest moments last. countdown: the best --top N clips ranked like `highlights top` (by score) "
+                   "and played from the lowest rank up, with a big number on each. Both replace --order; --skip works.")
+@click.option("--top", "top_n", type=click.IntRange(1), help="Countdown size: keep only the best N clips (default all).")
+@click.option("--cold-open-seconds", type=float, default=9.0, show_default=True,
+              help="Length of the best-moment teaser before the intro with --structure paced (0 turns it off).")
+@click.option("--submit-url", default="", help="Where to submit clips: shown on the end card and in the description.")
+@click.option("--description", "description_path", type=click.Path(dir_okay=False, path_type=Path),
+              help="Write the YouTube description (chapters, credits, match links) to this text file.")
+@click.option("--thumbnail", "thumbnail_path", type=click.Path(dir_okay=False, path_type=Path),
+              help="Write a thumbnail JPEG from the best clip (and <name>-2, <name>-3 from the next).")
+@click.option("--thumbnail-count", type=click.IntRange(1, 6), default=3, show_default=True)
+@click.option("--thumb-text", help="Callout text for the first thumbnail instead of the computed one, e.g. 'HE WON THIS?!'.")
+@click.option("--no-ai-copy", is_flag=True, help="With --ai, do not ask the model for titles, intro and thumbnail picks.")
 @click.option("--no-title", is_flag=True, help="Skip the title card.")
 @click.option("--no-bug", is_flag=True, help="Skip the corner bug.")
 @click.option("--no-lower-thirds", is_flag=True)
@@ -235,6 +283,8 @@ def _load_broll(ffmpeg: Path, folder: Path, mains: list) -> dict[str, list[tuple
 def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None, episode: int, week: str, featuring: str,
          league: str, channel: str, next_up: str, team: str, names_path: Path | None, title_style: str, title_seconds: float,
          ai_url: str | None, ai_model: str | None, ai_fast: bool, plan_path: Path | None,
+         structure: str, top_n: int | None, cold_open_seconds: float, submit_url: str, description_path: Path | None,
+         thumbnail_path: Path | None, thumbnail_count: int, thumb_text: str | None, no_ai_copy: bool,
          kill_padding: float | None, slowmo: str, slowmo_clips: str, slowmo_speed: float, transitions: str, snap_cuts_on: bool, music_files: tuple[Path, ...], music_dir: Path | None, sections_by: str, broll_dir: Path | None,
          broll_seconds: float, music_volume: float, music_start: float | None,
          order: str, reverse: bool, seed: int | None, pick: str | None, skip: str | None,
@@ -253,6 +303,11 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
         raise click.UsageError("pass video files, or a single folder")
     if len(videos) > 1 and (report_path or clips_dir):
         raise click.UsageError("--report and --clips-dir only work with a single video")
+    if structure != "none" and (order != "chronological" or reverse or pick or sections_by != "none"):
+        raise click.UsageError("--structure sets the order itself: drop --order/--reverse/--pick/--sections "
+                               "(--skip is fine)")
+    if top_n and structure != "countdown":
+        raise click.UsageError("--top only works with --structure countdown")
     video = videos[0]
     output = output or (video.with_name(video.stem + "-cotw.mp4") if len(videos) == 1
                         else video.with_name(f"cotw-ep{episode:02d}.mp4"))
@@ -291,7 +346,7 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
         if ai_url or (plan_path and plan_path.is_file()):
             ctx = click.get_current_context()
             plan = _edit_plan(timeline, ai_url, ai_model, plan_path, think=not ai_fast)
-            if not (order != "chronological" or pick or skip or reverse):
+            if structure == "none" and not (order != "chronological" or pick or skip or reverse):
                 pick = ",".join(map(str, plan.order))
             if plan.slowmo and ctx.get_parameter_source("slowmo_clips") == click.core.ParameterSource.DEFAULT:
                 slowmo_clips = ",".join(map(str, plan.slowmo))
@@ -305,6 +360,26 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
                                pick=parse_numbers(pick) if pick else None,
                                skip=parse_numbers(skip) if skip else None)
             click.echo("Final order:")
+        labels: dict[int, str] | None = None
+        cold_open: tuple[int, float, float] | None = None
+        if structure == "countdown":
+            timeline = relayout(ep.countdown_order(timeline.clips, top_n))
+            click.echo("Countdown: " + " ".join(f"#{c.rank}=clip {c.number}" for c in timeline.clips))
+        if structure == "paced":
+            ordered, labels = ep.paced_order(timeline.clips)
+            timeline = relayout(ordered)
+            click.echo("Paced order: " + " ".join(f"#{c.number}({labels[c.number][0]})" for c in timeline.clips)
+                       + "   (o = opening group, m = middle, p = biggest moments)")
+        if structure != "none":
+            if cold_open_seconds > 0:
+                # a countdown must not give away #1: tease the runner-up
+                by_score = sorted(timeline.clips, key=lambda c: -c.score)
+                best = by_score[1] if structure == "countdown" and len(by_score) > 2 else by_score[0]
+                st, ln = ep.cold_open_window(best, max_len=cold_open_seconds)
+                cold_open = (best.source, st, ln)
+                click.echo(f"Cold open: {ln:.1f}s from clip #{best.number} ({best.player} · {best.stat})")
+            if ctx_source(click.get_current_context(), "title_seconds"):
+                title_seconds = 4.0  # a fast intro
         if broll_dir and sections_by != "map":
             raise click.UsageError("--broll needs --sections map")
         if sections_by == "map":
@@ -316,16 +391,18 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
             if broll_dir and not footage:
                 click.echo("warning: no b-roll footage matched the maps in this episode", err=True)
         title = 0.0 if no_title else title_seconds
+        cold = cold_open[2] if cold_open else 0.0
+        lead = cold + title  # where the first clip starts in the finished video
         songs = list(music_files)
         if music_dir and not songs:
-            songs = _pick_music(timeline, music_dir, ai_url, ai_model, not ai_fast, title)
+            songs = _pick_music(timeline, music_dir, ai_url, ai_model, not ai_fast, lead)
         if slowmo != "none":
             sel = slowmo_clips if slowmo_clips in ("auto", "all") else parse_numbers(slowmo_clips)
             timeline = apply_slowmo(timeline, slowmo, slowmo_speed, sel)
             click.echo("Slow motion on clip(s): " + (", ".join(f"#{c.number}" for c in timeline.clips if c.slow) or "none"))
         song_len = [audio_duration(ffmpeg, p) for p in songs]
-        first = title if music_start is None else music_start
-        switches = song_switches(timeline, song_len, offset=title, start=first) if len(songs) > 1 else []
+        first = (cold or title) if music_start is None else music_start  # music starts on the intro, or after the title
+        switches = song_switches(timeline, song_len, offset=lead, start=first) if len(songs) > 1 else []
         if len(songs) > 1:
             if len(switches) + 1 < len(songs):
                 click.echo(f"note: {len(songs) - len(switches) - 1} song(s) left out: no later section start fits", err=True)
@@ -335,11 +412,11 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
                 raise click.UsageError("--snap-cuts needs --music")
             all_beats = [detect_beats(p) for p in songs]
             if music_start is None and all_beats[0]:  # put the track's first beat on the first cut
-                music_start = max(0.0, title - all_beats[0][0])
-            timeline, song_starts = snap_cuts_multi(timeline, all_beats, switches, offset=title,
-                                                    music_start=title if music_start is None else music_start)
+                music_start = max(0.0, lead - all_beats[0][0])
+            timeline, song_starts = snap_cuts_multi(timeline, all_beats, switches, offset=lead,
+                                                    music_start=first if music_start is None else music_start)
         else:
-            song_starts = [first] + [title + timeline.clips[i].start for i in switches]
+            song_starts = [first] + [lead + timeline.clips[i].start for i in switches]
         for p, st in zip(songs, song_starts):
             if len(songs) > 1:
                 click.echo(f"Song at {st:6.1f}s: {p.name}")
@@ -358,14 +435,36 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
         kinds = ", ".join(sorted({k for _, k in planned})) or "none"
         click.echo(f"Transitions: {len(planned)} cuts ({kinds})")
 
-    meta = graphics.EpisodeMeta(episode, week, featuring, league, channel, next_up)
+    meta = graphics.EpisodeMeta(episode, week, featuring, league, channel, next_up, submit_url)
     opts = Options(title_seconds=title_seconds, end_seconds=end_seconds, lower_third_seconds=lower_third_seconds,
                    end_mode="append" if end_mode == "off" else end_mode, encoder=encoder, quality=quality, fps=fps,
                    music=songs[0] if len(songs) == 1 else None, music_volume=music_volume,
                    music_start=music_start if len(songs) <= 1 else None,
                    music_duration=song_len[0] if len(songs) == 1 else None,
                    tracks=tuple(zip(songs, song_starts, song_len)) if len(songs) > 1 else (),
-                   transitions=tuple(planned))
+                   transitions=tuple(planned), cold=cold_open)
+
+    if description_path or thumbnail_path:
+        copy = None
+        if ai_url and not no_ai_copy:
+            try:
+                copy = suggest_copy(timeline, episode, league, ai_url, ai_model)
+                click.echo("AI copy: " + " | ".join(copy.titles))
+            except AiError as exc:
+                click.echo(f"warning: no AI copy ({exc}); using the plain template", err=True)
+        if description_path:
+            outro_at = None if end_mode == "off" else (
+                lead + timeline.duration if end_mode == "append" else lead + max(0.0, timeline.duration - end_seconds))
+            info = ep.DescriptionInfo(episode, week, league, channel, submit_url, next_up,
+                                      top_n=len(timeline.clips) if structure == "countdown" else 0)
+            text = ep.description(timeline, info, lead=lead, cold=cold, labels=labels, outro_at=outro_at,
+                                  titles=copy.titles if copy else None, intro_text=copy.intro if copy else None)
+            description_path.parent.mkdir(parents=True, exist_ok=True)
+            description_path.write_text(text, encoding="utf-8")
+            click.echo(f"Description: {description_path}")
+        if thumbnail_path:
+            _write_thumbnails(ffmpeg, mains, timeline, meta, thumbnail_path, thumbnail_count, thumb_text,
+                              copy.thumbnail_clips if copy else [])
 
     keep = graphics_only is not None
     work = graphics_only or Path(tempfile.mkdtemp(prefix="cotw-"))

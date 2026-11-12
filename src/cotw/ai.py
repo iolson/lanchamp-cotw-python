@@ -211,3 +211,70 @@ def suggest_music(
     if file not in {t["file"] for t in tracks}:
         raise AiError(f"the model picked {file!r}, which is not one of the candidate tracks")
     return file, reasons
+
+
+COPY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "titles": {"type": "array", "items": {"type": "string"}},
+        "intro": {"type": "string"},
+        "thumbnail_clips": {"type": "array", "items": {"type": "integer"}},
+    },
+    "required": ["titles", "intro", "thumbnail_clips"],
+}
+
+
+@dataclass
+class Copy:
+    titles: list[str]
+    intro: str
+    thumbnail_clips: list[int]
+
+
+def suggest_copy(
+    timeline: Timeline, episode: int, league: str, base_url: str, model: str | None = None,
+    timeout: float = 400.0,
+) -> Copy:
+    """Title options, a short description intro and the clips that make the best thumbnails.
+
+    The model only sees what is in the clip list, and the thumbnail's callout text is not its job: that
+    is computed from the stats, so a thumbnail never promises a feat the clip does not show.
+    """
+    base = base_url.rstrip("/")
+    model = model or _first_model(base, timeout)
+    clips = [clip_brief(c) | {"team": c.team, "opponent": c.opponent, "division": c.division}
+             for c in timeline.clips if not c.broll]
+    prompt = (
+        f"Write YouTube copy for LANChamp Clips of the Week EP.{episode:02d}"
+        f"{' (' + league + ' matches)' if league else ''}. Use only facts in the clip list; never invent "
+        "names, teams, scores or feats.\n"
+        "1. 'titles': three title options, each under 70 characters, written for CS2 viewers. The thumbnail "
+        "carries the big callout (like '1V5?!'), so the title must not repeat it; name the series or the "
+        "week's theme instead.\n"
+        "2. 'intro': two sentences (under 280 characters) for the top of the description, plain text, no "
+        "hashtags, no emoji.\n"
+        "3. 'thumbnail_clips': up to three clip numbers whose moments would make the most striking "
+        "thumbnails (clutches, aces and unusual kills beat plain multi-kills), best first.\n\n"
+        f"Clips:\n{json.dumps(clips, indent=1)}"
+    )
+    reply = _post(
+        base + "/chat/completions",
+        {
+            "model": model, "temperature": 0.7, "max_tokens": 4000,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
+            "response_format": {"type": "json_schema", "json_schema": {"name": "copy", "schema": COPY_SCHEMA}},
+        },
+        timeout,
+    )
+    try:
+        raw = json.loads(reply["choices"][0]["message"]["content"])
+        titles = [str(t).strip() for t in raw["titles"] if str(t).strip()][:3]
+        intro = str(raw["intro"]).strip()
+        valid = {c.number for c in timeline.clips if not c.broll}
+        picks = [n for n in raw["thumbnail_clips"] if isinstance(n, int) and n in valid]
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise AiError(f"the model did not return usable copy: {reply!r:.200}") from exc
+    if not titles or not intro:
+        raise AiError("the model's copy was empty")
+    return Copy(titles, intro, list(dict.fromkeys(picks))[:3])

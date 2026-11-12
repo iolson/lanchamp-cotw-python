@@ -193,6 +193,43 @@ cotw-frag files --player fuzzyhat --music "files/song.mp3"      # only that play
   `Artist - Title.mp3` file name (`--name` / `--track-name` override). The game audio is mixed under the music (`--game-volume`, `--music-volume`).
 - Output is 60 fps from the 120 fps sources, like `cotw`. `--max-seconds` caps the length (for shorts).
 
+## Paced episodes, description and thumbnails
+
+```bash
+cotw files --episode 3 --week "Nov 10" --league ESEA --structure paced --kill-padding 2.5 \
+     --music-dir files --submit-url lanchamp.to/cotw --next-up EP.04 \
+     --description output/ep03.txt --thumbnail output/ep03.jpg --ai http://dgx:8000/v1 -o output/cotw-ep03.mp4
+```
+
+`--structure paced` replaces `--order`: a **cold open** (default 9 s, `--cold-open-seconds`) teases the best
+moment, then a fast 4 s intro, a **strong opening group**, a **varied middle** (no back-to-back repeats of
+player, team, map, division or kind of play) and the **biggest moments** (top 2-3 by score, best last), then the
+end card with the `--submit-url`. The music starts on the intro. `--skip` still works.
+
+`--description FILE` writes the YouTube description from the real final timeline: title options, intro, chapters
+(cold open, intro, the three blocks, outro), per-clip credits with timestamps (player, team, opponent,
+division, map/round) and match links. `--thumbnail FILE.jpg` writes a 1280x720 thumbnail from the best clip
+(`-2`, `-3` ... from the next best; `--thumbnail-count`): a real frame at the last kill, the LANChamp mark and
+episode number in a fixed corner, an accent colour that rotates per episode, and a callout computed from the stats
+(`1V5?!`, `ACE?!`, `3K?!`; override the first with `--thumb-text`). With `--ai` the model also writes three title
+options and the intro and ranks the clips that make the best thumbnails (`--no-ai-copy` skips it); the callout
+is never the model's, so it cannot overstate the clip.
+
+### Match data (FACEIT)
+
+The lower third, description and thumbnails use an optional `match` block in the highlights JSON:
+
+```json
+"match": {
+  "match_id": "1-...", "url": "https://www.faceit.com/en/cs2/room/1-...",
+  "division": "ESEA Open", "teams": ["Saltcrew", "Rivals"],
+  "players": { "<steamid64>": { "nickname": "FuzzyHat", "team": "Saltcrew" } }
+}
+```
+
+Every key is optional; the opponent is the other entry in `teams` (or set `"opponent"` per player). Priority for
+names and teams: `names.json`, then this block, then the in-game name.
+
 ## Cut transition looks
 
 Both commands share seven FFmpeg-only looks (`cotw --transitions`, `cotw-frag --transitions`); each is a

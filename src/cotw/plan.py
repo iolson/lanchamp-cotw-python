@@ -45,6 +45,14 @@ class ClipPlan:
     detail: str = ""  # e.g. "4K (m4a1)"; context for people / the LLM, not shown on screen
     map: str = ""  # e.g. "anubis"; clips of one map form a section
     broll: bool = False  # empty-map footage that opens a section: no lower third or stat punch
+    opponent: str = ""  # from the report's `match` block (FACEIT); empty when it has none
+    division: str = ""  # e.g. "Open", "Intermediate"
+    match_id: str = ""
+    match_url: str = ""
+    won_clutch: int = 0  # opponents beaten in a won clutch (1v3 -> 3); 0 when there was none
+    kills_n: int = 0  # kills in the featured moment
+    round: int = 0
+    rank: int = 0  # countdown position, 1 = best; 0 when the episode is not a countdown
 
 
 SLOW_BEFORE, SLOW_AFTER = 0.30, 0.45  # full slow motion runs from just before a kill to just after it
@@ -169,6 +177,46 @@ def _lookup(player: str, steamid: str, names: dict[str, PlayerInfo]) -> PlayerIn
     return lowered.get(player.lower(), PlayerInfo())
 
 
+@dataclass(frozen=True)
+class MatchContext:
+    """Who a player was playing for and against, from the report's optional `match` block.
+
+    The block is written by the highlights tool's FACEIT enrichment:
+    {"match_id", "url", "division", "competition", "teams": [A, B],
+     "players": {"<steamid64>": {"nickname", "team", "opponent"?}}}; every key is optional.
+    """
+
+    nickname: str = ""
+    team: str = ""
+    opponent: str = ""
+    division: str = ""
+    match_id: str = ""
+    url: str = ""
+
+
+def match_context(report: dict, steamid: str, player: str) -> MatchContext:
+    match = report.get("match")
+    if not isinstance(match, dict):
+        return MatchContext()
+    players = match.get("players") or {}
+    entry = players.get(steamid)
+    if entry is None and player:  # fall back to the nickname / in-game name, ignoring case
+        low = player.lower()
+        entry = next((e for e in players.values()
+                      if low in (str(e.get("nickname", "")).lower(), str(e.get("name", "")).lower())), None)
+    entry = entry if isinstance(entry, dict) else {}
+    team = str(entry.get("team") or "")
+    teams = [str(t.get("name") if isinstance(t, dict) else t) for t in match.get("teams") or []]
+    opponent = str(entry.get("opponent") or "")
+    if not opponent and team and len(teams) == 2 and team in teams:
+        opponent = teams[1 - teams.index(team)]
+    return MatchContext(
+        nickname=str(entry.get("nickname") or ""), team=team, opponent=opponent,
+        division=str(match.get("division") or match.get("competition") or ""),
+        match_id=str(match.get("match_id") or match.get("id") or ""), url=str(match.get("url") or ""),
+    )
+
+
 def load_report(path: Path) -> dict:
     try:
         report = json.loads(path.read_text(encoding="utf-8"))
@@ -284,9 +332,16 @@ def build_timeline(
             punch = Punch(punch.label, punch.value, context)
         cam = (seq.get("cameras") or [{}])[0]
         player = best.get("player") or cam.get("name", "")
-        info = _lookup(player, str(best.get("steamid") or cam.get("steamid") or ""), names or {})
+        steamid = str(best.get("steamid") or cam.get("steamid") or "")
+        info = _lookup(player, steamid, names or {})
+        mc = match_context(report, steamid, player)  # names.json overrides FACEIT, which beats the in-game name
+        clutch = best.get("clutch")
         clips.append(
-            ClipPlan(seq["number"], out, dur, info.name or player, stat, context, punch, info.team or "",
+            ClipPlan(seq["number"], out, dur, info.name or mc.nickname or player, stat, context, punch,
+                     info.team or mc.team or "",
+                     opponent=mc.opponent, division=mc.division, match_id=mc.match_id, match_url=mc.url,
+                     won_clutch=int(clutch["opponents"]) if clutch and clutch.get("won") else 0,
+                     kills_n=int(best.get("kills") or 0), round=int(seq.get("round") or 0),
                      score=float(best.get("score", 0)), src_start=t + lead, trimmed=trimmed,
                      src_len=src_len, src_max=src_max, min_src=min_src,
                      kills=tuple((k["t"] - lead, k["headshot"], k["special"]) for k in kl or []),
