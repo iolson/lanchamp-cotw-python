@@ -219,3 +219,15 @@ def test_fast_forward_audio_chains_atempo_up_to_2x():
     from cotw.compose import _fast_audio
     assert _fast_audio(4.0) == ",atempo=2,atempo=2,volume=0.6"
     assert _fast_audio(1.5) == ",atempo=1.5,volume=0.6"
+
+
+def test_jump_cuts_drop_frames_and_fade_the_audio_at_the_cut():
+    tl = Timeline([ClipPlan(1, 0.0, 6.0, "a", "3K", "c", None, src_start=2.0, src_len=10.0,
+                            jumps=((3.0, 7.0),))], 6.0)
+    args = build_args(MAIN, tl, _assets(lower_thirds={}, punches={}), Options(), Path("o.mp4"))
+    g, joined = _graph(args), " ".join(args)
+    assert "-ss 2 -t 10 -i in.mp4" in joined  # the input still spans the cut
+    assert "setpts=PTS-STARTPTS,select='not(between(t,3,7))'" in g
+    assert "if(lt(ld(0),3.000000),0.000000+(ld(0)-0.000000)/1.000000,3.000000+(ld(0)-7.000000)/1.000000)" in g
+    assert "atrim=start=0:end=3,asetpts=PTS-STARTPTS,afade=t=out:st=2.97:d=0.03" in g
+    assert "atrim=start=7:end=10,asetpts=PTS-STARTPTS,afade=t=in:d=0.03" in g

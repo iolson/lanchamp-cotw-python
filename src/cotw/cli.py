@@ -269,6 +269,9 @@ def _write_thumbnails(ffmpeg: Path, mains: list, timeline: Timeline, meta: graph
 @click.option("--lull-speed", type=click.FloatRange(1.0, 8.0), default=4.0, show_default=True,
               help="Fast-forward the lulls between kills (e.g. a 1v3 walking between fights) at this speed, with eased "
                    "ramps, so the whole play stays in; 1 turns it off. Needs the kill positions of --kill-padding reports.")
+@click.option("--jump-cuts", type=click.FloatRange(min=0), default=10.0, show_default=True,
+              help="Lulls between kills longer than this many seconds are jump-cut (1.5 s kept after the kill, 2.5 s "
+                   "before the next) instead of fast-forwarded; 0 fast-forwards them all.")
 @click.option("--transitions", type=click.Choice(["none", "random", *fx.KINDS]), default="none", show_default=True,
               help="Cut effects on the joins between clips: film burn, TV no-signal, RGB glitch, sepia old film, "
                    "grunge, pixelate and anamorphic flare; random picks a seeded look per cut.")
@@ -347,7 +350,7 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
          structure: str, top_n: int | None, cold_open_seconds: float, submit_url: str, description_path: Path | None,
          thumbnail_path: Path | None, thumbnail_count: int, flat_thumbnails: bool, thumb_style: str, no_thumb_arrow: bool,
          blender_path: Path | None, thumbnails_only: bool, thumb_text: str | None, copy_ai_url: str | None, no_ai_copy: bool,
-         kill_padding: float | None, slowmo: str, slowmo_clips: str, slowmo_speed: float, lull_speed: float, transitions: str, snap_cuts_on: bool, music_files: tuple[Path, ...], music_dir: Path | None, sections_by: str, broll_dir: Path | None,
+         kill_padding: float | None, slowmo: str, slowmo_clips: str, slowmo_speed: float, lull_speed: float, jump_cuts: float, transitions: str, snap_cuts_on: bool, music_files: tuple[Path, ...], music_dir: Path | None, sections_by: str, broll_dir: Path | None,
          broll_seconds: float, music_volume: float, music_start: float | None,
          order: str, reverse: bool, seed: int | None, pick: str | None, skip: str | None,
          end_seconds: float, lower_third_seconds: float, lower_third_scale: float, end_mode: str, no_title: bool, no_bug: bool, no_lower_thirds: bool, no_punch: bool,
@@ -406,10 +409,13 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
             mains.append((v, info))
             timelines.append(tl)
         timeline = merge_timelines(timelines)
-        timeline = apply_fastforward(timeline, lull_speed)
+        timeline = apply_fastforward(timeline, lull_speed, jump_cuts)
         if any(c.fast for c in timeline.clips):
             click.echo(f"Fast-forward x{lull_speed:g} through lulls on clip(s): "
                        + ", ".join(f"#{c.number}" for c in timeline.clips if c.fast))
+        if any(c.jumps for c in timeline.clips):
+            click.echo("Jump cuts over long lulls: " + ", ".join(
+                f"#{c.number} (-{sum(b - a for a, b in c.jumps):.0f}s)" for c in timeline.clips if c.jumps))
         if ai_url or (plan_path and plan_path.is_file()):
             ctx = click.get_current_context()
             plan = _edit_plan(timeline, ai_url, ai_model, plan_path, think=not ai_fast)
@@ -516,7 +522,7 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
     for c in timeline.clips:
         punch = f"  punch {c.punch.value}" if c.punch else ""
         slow = f"  slow-mo x{len(c.slow)}" if c.slow else ""
-        fast = f"  fast x{len(c.fast)}" if c.fast else ""
+        fast = (f"  fast x{len(c.fast)}" if c.fast else "") + (f"  jump x{len(c.jumps)}" if c.jumps else "")
         click.echo(f"  #{c.number:<2} {c.start:7.1f}s +{c.duration:5.1f}s  {c.player} · {c.stat}{punch}{slow}{fast}")
 
     # Cut effects on the final timeline; a window must not reach before 0, so early cuts stay clean.

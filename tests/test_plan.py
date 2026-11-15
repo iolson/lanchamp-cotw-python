@@ -355,3 +355,16 @@ def test_lulls_between_kills_are_fast_forwarded_with_ramps():
     assert c.duration < 20.0 and apply_fastforward(tl, 1.0).clips[0].fast == ()
     s = apply_slowmo(apply_fastforward(tl, 4.0), "last", select="all").clips[0]
     assert s.fast == c.fast and s.slow and abs(s.duration - sum(l / sp for _, l, sp in clip_segments(s))) < 1e-6
+
+
+def test_long_lulls_are_jump_cut_and_short_ones_fast_forwarded():
+    from cotw.plan import apply_fastforward
+    tl = build_timeline(_clutch_report(), kill_padding=2.5)  # kills at 2.5, 26, 33 in the trimmed clip
+    c = apply_fastforward(tl, 4.0, jump_min=10.0).clips[0]
+    assert [tuple(round(x, 1) for x in w) for w in c.jumps] == [(4.0, 23.5)]  # 2.5 s of set-up kept before 26
+    assert [tuple(round(x, 1) for x in w) for w in c.fast] == [(27.5, 31.0)]  # the 3.5 s lull still plays fast
+    segs = clip_segments(c)
+    assert not any(4.0 < o + 1e-6 and o < 23.5 for o, _, _ in segs)  # nothing plays from inside the cut
+    assert any(abs(o - 23.5) < 0.05 for o, _, _ in segs)
+    assert abs(c.duration - sum(l / sp for _, l, sp in segs)) < 1e-6 and c.duration < 15.0
+    assert apply_fastforward(tl, 4.0).clips[0].jumps == ()  # jump_min 0: no jump cuts

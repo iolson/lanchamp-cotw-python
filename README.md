@@ -78,6 +78,7 @@ cotw files --episode 1 -o output/cotw-ep01.mp4
 | `--pick 3,1,5` / `--skip 2,4` | Use only these clips in this order / leave clips out |
 | `--kill-padding N` | Trim each clip to N seconds before its first kill and after its last (from the report's `beat_targets` plus the featured player's kills in its events, so a 1vX keeps every kill and a won clutch runs to its end) |
 | `--lull-speed X` | Fast-forward the lulls between kills (over 3 s of nothing, keeping 1.5 s after a kill and 2 s before the next) at X with eased ramps (default 4; 1 = off) |
+| `--jump-cuts N` | Lulls between kills longer than N seconds (default 10) are jump-cut instead of fast-forwarded: 1.5 s kept after the kill, 2.5 s of set-up before the next, tiny audio fades at the cut; 0 fast-forwards every lull |
 | `--music FILE` | Music bed: starts after the title card, plays once, ducked under the game audio (`--music-volume`, default 0.25; `--music-start` to move it) |
 | `--slowmo last\|special\|headshots\|all` | Slow motion around kills, eased in and out (off by default). `last` = each clip's final kill; `special`/`headshots` add those kills; `all` slows every kill. Needs 120 fps sources |
 | `--slowmo-clips auto\|all\|3,5` | Which clips get it (default `auto`: signature clips, i.e. clutch/ace/4K, best first, at most a third of the episode) |

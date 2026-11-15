@@ -43,6 +43,7 @@ class ClipPlan:
     speed: float = 0.5  # playback speed inside the slow windows
     fast: tuple[tuple[float, float], ...] = ()  # fast-forward windows over the lulls between kills
     fast_speed: float = 1.0  # playback speed inside the fast windows
+    jumps: tuple[tuple[float, float], ...] = ()  # source stretches cut out (jump cuts over long lulls)
     kills: tuple[tuple[float, bool, bool], ...] = ()  # (seconds after src_start, headshot, special)
     detail: str = ""  # e.g. "4K (m4a1)"; context for people / the LLM, not shown on screen
     map: str = ""  # e.g. "anubis"; clips of one map form a section
@@ -63,6 +64,8 @@ TAIL_AFTER_KILL = 0.8  # never cut closer than this to the last kill
 FAST_AFTER, FAST_BEFORE = 1.5, 2.0  # normal speed kept after a kill and before the next one
 FAST_MIN = 3.0  # lulls shorter than this (after those margins) play at normal speed
 FAST_RAMP = 0.6  # source seconds easing into / out of fast-forward, inside the lull
+JUMP_MIN = 10.0  # lulls longer than this (after the margins) are jump-cut instead of fast-forwarded
+JUMP_BEFORE = 2.5  # normal speed kept before the next kill after a jump cut (the set-up for the fight)
 SLOWMO_MODES = ("none", "last", "special", "headshots", "all")
 Window = tuple[float, float]
 
@@ -83,7 +86,7 @@ def _ramp(start: float, length: float, speed: float, easing_in: bool) -> list[tu
 
 
 def build_segments(src_len: float, slow: tuple[Window, ...], speed: float, fast: tuple[Window, ...] = (),
-                   fast_speed: float = 1.0) -> list[tuple[float, float, float]]:
+                   fast_speed: float = 1.0, jumps: tuple[Window, ...] = ()) -> list[tuple[float, float, float]]:
     """Split `src_len` source seconds into (offset, length, speed) pieces: normal speed, an ease down to
     `speed` before each slow window, the window itself, and an ease back up after it. Fast windows ease
     up to `fast_speed` and back down inside the window, so the moments around it stay at normal speed."""
@@ -119,21 +122,41 @@ def build_segments(src_len: float, slow: tuple[Window, ...], speed: float, fast:
         cursor = ramp_end
     if src_len - cursor > 1e-3 or not out:
         out.append((cursor, src_len - cursor, 1.0))
-    return out
+    return _cut(out, jumps)
+
+
+def _cut(pieces: list[tuple[float, float, float]], jumps: tuple[Window, ...]) -> list[tuple[float, float, float]]:
+    """`pieces` without the source stretches in `jumps`; the gaps left are the jump cuts."""
+    for a, b in jumps:
+        kept = []
+        for off, length, sp in pieces:
+            end = off + length
+            if end <= a or off >= b:
+                kept.append((off, length, sp))
+                continue
+            if a - off > 1e-3:
+                kept.append((off, a - off, sp))
+            if end - b > 1e-3:
+                kept.append((b, end - b, sp))
+        pieces = kept
+    return pieces
 
 
 def clip_length(src_len: float, slow: tuple[Window, ...], speed: float, fast: tuple[Window, ...] = (),
-                fast_speed: float = 1.0) -> float:
-    """Seconds a clip takes on screen: its source length stretched by slow motion, squeezed by fast-forward."""
-    return sum(length / sp for _, length, sp in build_segments(src_len, slow, speed, fast, fast_speed))
+                fast_speed: float = 1.0, jumps: tuple[Window, ...] = ()) -> float:
+    """Seconds a clip takes on screen: its source length stretched by slow motion, squeezed by fast-forward,
+    less its jump cuts."""
+    return sum(length / sp for _, length, sp in build_segments(src_len, slow, speed, fast, fast_speed, jumps))
 
 
 def _length(clip: "ClipPlan", src_len: float, slow: tuple[Window, ...] | None = None) -> float:
-    return clip_length(src_len, clip.slow if slow is None else slow, clip.speed, clip.fast, clip.fast_speed)
+    return clip_length(src_len, clip.slow if slow is None else slow, clip.speed, clip.fast, clip.fast_speed,
+                       clip.jumps)
 
 
 def clip_segments(clip: "ClipPlan") -> list[tuple[float, float, float]]:
-    return build_segments(clip.src_len or clip.duration, clip.slow, clip.speed, clip.fast, clip.fast_speed)
+    return build_segments(clip.src_len or clip.duration, clip.slow, clip.speed, clip.fast, clip.fast_speed,
+                          clip.jumps)
 
 
 def _slow_windows(kills: tuple[tuple[float, bool, bool], ...], mode: str, src_len: float) -> tuple[Window, ...]:
@@ -634,27 +657,42 @@ def apply_slowmo(
     return Timeline(out, t)
 
 
-def _fast_windows(kills: tuple[tuple[float, bool, bool], ...], src_len: float) -> tuple[Window, ...]:
-    """The lulls between kills, less a margin of normal speed on each side."""
+def _lull_windows(kills: tuple[tuple[float, bool, bool], ...], src_len: float,
+                  jump_min: float = 0.0) -> tuple[tuple[Window, ...], tuple[Window, ...]]:
+    """(fast, jumps): the lulls between kills, less a margin of normal speed on each side. Lulls longer than
+    `jump_min` (0: never) are jump cuts instead, keeping a little more set-up before the next kill."""
     ts = sorted(t for t, _, _ in kills)
-    return tuple(
-        (a + FAST_AFTER, min(src_len, b - FAST_BEFORE)) for a, b in zip(ts, ts[1:])
-        if min(src_len, b - FAST_BEFORE) - (a + FAST_AFTER) >= FAST_MIN
-    )
+    fast, jumps = [], []
+    for a, b in zip(ts, ts[1:]):
+        lo, hi = a + FAST_AFTER, min(src_len, b - FAST_BEFORE)
+        if hi - lo < FAST_MIN:
+            continue
+        if jump_min and hi - lo > jump_min:
+            jumps.append((lo, min(src_len, b - JUMP_BEFORE)))
+        else:
+            fast.append((lo, hi))
+    return tuple(fast), tuple(jumps)
 
 
-def apply_fastforward(timeline: Timeline, speed: float) -> Timeline:
+def _fast_windows(kills: tuple[tuple[float, bool, bool], ...], src_len: float) -> tuple[Window, ...]:
+    return _lull_windows(kills, src_len)[0]
+
+
+def apply_fastforward(timeline: Timeline, speed: float, jump_min: float = 0.0) -> Timeline:
     """Speed through the lulls between kills (a 1v3 walking between fights) with eased ramps, so the
-    whole play fits in the episode instead of being cut after the first kill."""
-    if speed <= 1.0:
+    whole play fits in the episode instead of being cut after the first kill; lulls longer than `jump_min`
+    seconds (0: none) are jump-cut instead, since even at 4x they drag."""
+    if speed <= 1.0 and not jump_min:
         return timeline
     out: list[ClipPlan] = []
     t = 0.0
     for clip in timeline.clips:
         src_len = clip.src_len or clip.duration
-        fast = _fast_windows(clip.kills, src_len)
-        if fast:
-            clip = replace(clip, src_len=src_len, fast=fast, fast_speed=speed)
+        fast, jumps = _lull_windows(clip.kills, src_len, jump_min)
+        if speed <= 1.0:
+            fast = ()
+        if fast or jumps:
+            clip = replace(clip, src_len=src_len, fast=fast, fast_speed=speed if fast else 1.0, jumps=jumps)
             clip = replace(clip, duration=_length(clip, src_len))
         out.append(replace(clip, start=t))
         t += clip.duration

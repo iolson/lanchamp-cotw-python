@@ -267,10 +267,13 @@ def build_args(
     for k, clip in enumerate(timeline.clips):
         path, mi = mains[clip.source]
         segs = clip_segments(clip)
-        src_len = sum(length for _, length, _ in segs)
+        src_len = segs[-1][0] + segs[-1][1]  # jump cuts leave gaps, so not the sum of the lengths
         shown = sum(length / speed for _, length, speed in segs)
         idx = g.add_input("-ss", _num(clip.src_start), "-t", _num(src_len), "-i", str(path))
         retime = f"setpts='{_retime_expr(segs)}/TB'," if len(segs) > 1 or abs(segs[0][2] - 1.0) > 1e-6 else ""
+        if clip.jumps:  # drop the cut stretches; the remaining frames keep their source times for the retime
+            gone = "+".join(f"between(t,{_num(a)},{_num(b)})" for a, b in clip.jumps)
+            retime = f"setpts=PTS-STARTPTS,select='not({gone})'," + retime
         g.chain(f"[{idx}:v]{retime}fps={fps},scale={size},setsar=1[mv{k}]")
         if mi.has_audio:
             g.chain(f"[{idx}:a:0]aresample=48000,aformat=channel_layouts=stereo,asplit={len(segs)}"
@@ -278,6 +281,11 @@ def build_args(
             for j, (off, length, speed) in enumerate(segs):
                 slow = abs(speed - 1.0) > 1e-6
                 fx = ((SLOW_AUDIO.format(speed=_num(speed)) if speed < 1 else _fast_audio(speed)) if slow else "")
+                shown_j = length / speed  # tiny fades either side of a jump cut so it doesn't click
+                if j + 1 < len(segs) and segs[j + 1][0] - (off + length) > 1e-3:
+                    fx += f",afade=t=out:st={_num(max(0.0, shown_j - CUT_FADE))}:d={CUT_FADE}"
+                if j > 0 and off - (segs[j - 1][0] + segs[j - 1][1]) > 1e-3:
+                    fx += f",afade=t=in:d={CUT_FADE}"
                 g.chain(f"[as{k}_{j}]atrim=start={_num(off)}:end={_num(off + length)},asetpts=PTS-STARTPTS{fx}"
                         f"[ap{k}_{j}]")
             audio = ("".join(f"[ap{k}_{j}]" for j in range(len(segs)))
