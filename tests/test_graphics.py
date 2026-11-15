@@ -45,3 +45,13 @@ def test_thumbnail_styles_render_full_frame_with_and_without_3d_text():
     punch = thumb.render_punch(frame, meta, "1V4?!", callout=callout)
     assert punch.getpixel((300, 150))[:3] != (230, 220, 200)  # the callout sits top left
     assert thumb.accent_for(1) == thumb.accent_for(3) == "#00ACE7"  # brand cyan every week, no red/green
+
+
+def test_end_card_submit_line_clears_the_subscribe_button():
+    from cotw import graphics as g
+
+    img = g.end_card(g.EpisodeMeta(3, next_up="EP.04", submit_url="lanchamp.to/cotw")).convert("RGB")
+    band = img.crop((700, 770, 1220, 810))  # between the button (ends at 764) and the divider (818)
+    assert max(max(px) for px in band.getdata()) < 120  # only the dark background, no text or button
+    url = img.crop((700, 890, 1220, 950))
+    assert max(max(px) for px in url.getdata()) > 200  # the submit URL is drawn below it

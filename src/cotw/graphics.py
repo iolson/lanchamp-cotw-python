@@ -228,17 +228,21 @@ def end_card(meta: EpisodeMeta) -> Image.Image:
     # Space Grotesk has no play-triangle glyph (the browser falls back to a system font), so draw it.
     tri_w, tri_h, tri_gap = 26, 30, 22
     label_w = c.measure("SUBSCRIBE", "display", 700, 38, 1)
-    bw, bh = tri_w + tri_gap + label_w + 72, 84
+    bw, bh, by = tri_w + tri_gap + label_w + 72, 84, 680
     bx = cx - bw / 2
-    c.rect(bx, 700, bw, bh, color(CYAN), radius=12)
+    c.rect(bx, by, bw, bh, color(CYAN), radius=12)
     tx = bx + 36
-    with c.layer((tx, 700, tx + tri_w, 700 + bh)) as lay:
-        top = 700 + (bh - tri_h) / 2
+    with c.layer((tx, by, tx + tri_w, by + bh)) as lay:
+        top = by + (bh - tri_h) / 2
         lay.polygon([(tx, top), (tx + tri_w, top + tri_h / 2), (tx, top + tri_h)], color("#041018"))
-    c.text("SUBSCRIBE", tx + tri_w + tri_gap, 700 + 54, family="display", weight=700, size=38, ls=1, fill=color("#041018"))
-    if meta.submit_url:
-        c.text(f"Submit your clip · {meta.submit_url}", cx, 800, family="mono", weight=500, size=26, ls=5,
-               fill=color(WHITE), align="center", upper=True)
+    c.text("SUBSCRIBE", tx + tri_w + tri_gap, by + 54, family="display", weight=700, size=38, ls=1, fill=color("#041018"))
+    if meta.submit_url:  # its own block well below the button: the ask that brings in next week's clips
+        c.polyline([(cx - 220, 818), (cx + 220, 818)], color("#FFFFFF", 0.14), 1.5, round_caps=False)
+        c.circle(cx, 818, 4, color(GOLD))
+        c.text("Got a clip? Submit it", cx, 872, family="mono", weight=600, size=24, ls=6, fill=color(GOLD),
+               align="center", upper=True)
+        us = c.fit_size(meta.submit_url, "display", 700, 54, 0, W - 760)
+        c.text(meta.submit_url, cx, 936, family="display", weight=700, size=us, fill=color(WHITE), align="center")
     if meta.next_up:
         c.text("Next up", W - 96, H - 150, family="mono", weight=500, size=22, ls=5, fill=color(MUTED2), align="right", upper=True)
         c.text(meta.next_up, W - 96, H - 104, family="display", weight=700, size=46, fill=color(WHITE), align="right", upper=True)
