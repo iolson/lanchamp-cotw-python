@@ -29,6 +29,12 @@ def test_paced_order_spreads_players_in_the_middle():
     assert all(x.player != y.player for x, y in zip(body, body[1:]))
 
 
+def test_paced_labels_keep_a_picked_order():
+    clips = [_clip(i, f"p{i}", s) for i, s in enumerate([5, 40, 12, 30, 8, 25, 18, 50], start=1)]
+    labels = ep.paced_labels(clips)
+    assert [labels[c.number] for c in clips] == ["opener"] * 3 + ["middle"] * 3 + ["peak"] * 2
+
+
 def test_small_episodes_have_no_peak_block():
     order, labels = ep.paced_order([_clip(1, "a", 3), _clip(2, "b", 9)])
     assert set(labels.values()) <= {"opener", "middle"}

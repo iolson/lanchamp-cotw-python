@@ -66,6 +66,15 @@ def paced_order(clips: list[ClipPlan]) -> tuple[list[ClipPlan], dict[int, str]]:
     return [*opener, *middle, *peak], labels
 
 
+def paced_labels(clips: list[ClipPlan]) -> dict[int, str]:
+    """Block labels for a hand-picked order (`--pick` with paced): the last two or three clips are the
+    biggest moments, the first share of the rest the opening group, everything between the middle."""
+    k = peak_count(len(clips))
+    n_open = math.ceil((len(clips) - k) * OPENER_SHARE)
+    return {c.number: "opener" if i < n_open else "peak" if i >= len(clips) - k else "middle"
+            for i, c in enumerate(clips)}
+
+
 def countdown_order(clips: list[ClipPlan], top: int | None = None) -> list[ClipPlan]:
     """Rank clips the way `highlights top` does (best `score` first, across all videos), keep the best
     `top`, and play them from the lowest rank up so #1 comes last. Each clip gets its `rank`."""

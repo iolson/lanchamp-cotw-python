@@ -253,7 +253,8 @@ def _write_thumbnails(ffmpeg: Path, mains: list, timeline: Timeline, meta: graph
               help="Edit plan JSON: loaded if it exists, otherwise written after --ai asks the model.")
 @click.option("--structure", type=click.Choice(["none", "paced", "countdown"]), default="none", show_default=True,
               help="paced: cold open teasing the best clip, fast intro, a strong opening group, a varied middle and "
-                   "the biggest moments last. countdown: the best --top N clips ranked like `highlights top` (by score) "
+                   "the biggest moments last (with --pick, your order is kept and the cold open teases the last clip). "
+                   "countdown: the best --top N clips ranked like `highlights top` (by score) "
                    "and played from the lowest rank up, with a big number on each. Both replace --order; --skip works.")
 @click.option("--top", "top_n", type=click.IntRange(1), help="Countdown size: keep only the best N clips (default all).")
 @click.option("--cold-open-seconds", type=float, default=9.0, show_default=True,
@@ -303,9 +304,10 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
         raise click.UsageError("pass video files, or a single folder")
     if len(videos) > 1 and (report_path or clips_dir):
         raise click.UsageError("--report and --clips-dir only work with a single video")
-    if structure != "none" and (order != "chronological" or reverse or pick or sections_by != "none"):
-        raise click.UsageError("--structure sets the order itself: drop --order/--reverse/--pick/--sections "
-                               "(--skip is fine)")
+    if structure != "none" and (order != "chronological" or reverse or sections_by != "none"
+                                or (pick and structure != "paced")):
+        raise click.UsageError("--structure sets the order itself: drop --order/--reverse/--sections, and --pick "
+                               "unless it is paced (--skip is fine)")
     if top_n and structure != "countdown":
         raise click.UsageError("--top only works with --structure countdown")
     video = videos[0]
@@ -366,15 +368,20 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
             timeline = relayout(ep.countdown_order(timeline.clips, top_n))
             click.echo("Countdown: " + " ".join(f"#{c.rank}=clip {c.number}" for c in timeline.clips))
         if structure == "paced":
-            ordered, labels = ep.paced_order(timeline.clips)
-            timeline = relayout(ordered)
+            if pick:  # keep the hand-picked order; only the blocks are worked out
+                labels = ep.paced_labels(timeline.clips)
+            else:
+                ordered, labels = ep.paced_order(timeline.clips)
+                timeline = relayout(ordered)
             click.echo("Paced order: " + " ".join(f"#{c.number}({labels[c.number][0]})" for c in timeline.clips)
                        + "   (o = opening group, m = middle, p = biggest moments)")
         if structure != "none":
             if cold_open_seconds > 0:
-                # a countdown must not give away #1: tease the runner-up
+                # a countdown must not give away #1: tease the runner-up; a picked paced order teases its finale
                 by_score = sorted(timeline.clips, key=lambda c: -c.score)
                 best = by_score[1] if structure == "countdown" and len(by_score) > 2 else by_score[0]
+                if structure == "paced" and pick:
+                    best = timeline.clips[-1]
                 st, ln = ep.cold_open_window(best, max_len=cold_open_seconds)
                 cold_open = (best.source, st, ln)
                 click.echo(f"Cold open: {ln:.1f}s from clip #{best.number} ({best.player} · {best.stat})")

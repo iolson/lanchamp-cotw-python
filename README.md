@@ -204,7 +204,9 @@ cotw files --episode 3 --week "Nov 10" --league ESEA --structure paced --kill-pa
 `--structure paced` replaces `--order`: a **cold open** (default 9 s, `--cold-open-seconds`) teases the best
 moment, then a fast 4 s intro, a **strong opening group**, a **varied middle** (no back-to-back repeats of
 player, team, map, division or kind of play) and the **biggest moments** (top 2-3 by score, best last), then the
-end card with the `--submit-url`. The music starts on the intro. `--skip` still works.
+end card with the `--submit-url`. The music starts on the intro. `--skip` still works, and
+`--pick 3,18,...` keeps your own order instead: the last two or three clips become the biggest moments and the
+cold open teases the last one.
 
 `--description FILE` writes the YouTube description from the real final timeline: title options, intro, chapters
 (cold open, intro, the three blocks, outro), per-clip credits with timestamps (player, team, opponent,
