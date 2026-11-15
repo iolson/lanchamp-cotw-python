@@ -184,7 +184,8 @@ def _intro_meta_times(intro: Path, length: float) -> tuple[float, float]:
 
 
 def _write_thumbnails(ffmpeg: Path, mains: list, timeline: Timeline, meta: graphics.EpisodeMeta, path: Path,
-                      count: int, text: str | None, preferred: list[int], blender: Path | None = None) -> None:
+                      count: int, text: str | None, preferred: list[int], blender: Path | None = None,
+                      style: str = "classic", arrow: bool = True) -> None:
     """Hero thumbnails from the best clips: `path` for the first, `<stem>-2`, `<stem>-3` ... for the others.
     With `blender`, the callouts are 3D text rendered there instead of flat text."""
     picks = ep.thumbnail_picks(timeline.clips, count, preferred)
@@ -192,7 +193,10 @@ def _write_thumbnails(ffmpeg: Path, mains: list, timeline: Timeline, meta: graph
     callouts: list = [None] * len(picks)
     if blender:
         try:
-            callouts = thumb.render_callouts(blender, [(t, thumb.accent_for(meta.episode)) for t in labels])
+            if style == "punch":
+                callouts = thumb.render_callouts(blender, [(t, thumb.PUNCH_SIDE) for t in labels], face=thumb.PUNCH_FACE)
+            else:
+                callouts = thumb.render_callouts(blender, [(t, thumb.accent_for(meta.episode)) for t in labels])
         except (FfmpegError, OSError) as exc:
             click.echo(f"warning: 3D thumbnail text failed, using flat text: {exc}", err=True)
     for i, clip in enumerate(picks):
@@ -205,7 +209,11 @@ def _write_thumbnails(ffmpeg: Path, mains: list, timeline: Timeline, meta: graph
             click.echo(f"warning: thumbnail for clip #{clip.number} skipped: {exc}", err=True)
             continue
         label = labels[i]
-        thumb.save(thumb.render(frame, meta, label, clip.player, clip.team, callout=callouts[i]), out)
+        if style == "punch":
+            img = thumb.render_punch(frame, meta, label, clip.player, clip.team, callout=callouts[i], arrow=arrow)
+        else:
+            img = thumb.render(frame, meta, label, clip.player, clip.team, callout=callouts[i])
+        thumb.save(img, out)
         click.echo(f"Thumbnail {out}: clip #{clip.number} {clip.player} \"{label}\"{' (3D)' if callouts[i] else ''}")
 
 
@@ -304,6 +312,11 @@ def _write_thumbnails(ffmpeg: Path, mains: list, timeline: Timeline, meta: graph
 @click.option("--thumbnail", "thumbnail_path", type=click.Path(dir_okay=False, path_type=Path),
               help="Write a thumbnail JPEG from the best clip (and <name>-2, <name>-3 from the next).")
 @click.option("--thumbnail-count", type=click.IntRange(1, 6), default=3, show_default=True)
+@click.option("--thumb-style", type=click.Choice(["classic", "punch"]), default="classic", show_default=True,
+              help="classic: white/cyan callout bottom left, branding top left. punch: huge gold 3D callout top left "
+                   "with a thick dark edge, a gold arrow at the crosshair, a saturated frame and a series badge "
+                   "bottom left (the look of the most-viewed game highlight channels).")
+@click.option("--no-thumb-arrow", is_flag=True, help="With --thumb-style punch, leave out the arrow.")
 @click.option("--flat-thumbnails", is_flag=True, help="Flat callout text on thumbnails instead of 3D text from Blender.")
 @click.option("--blender", "blender_path", type=click.Path(dir_okay=False, path_type=Path),
               help="Blender for 3D thumbnail text (default: $BLENDER, PATH, then /Applications/Blender.app).")
@@ -332,7 +345,7 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
          league: str, channel: str, next_up: str, team: str, names_path: Path | None, title_style: str, title_seconds: float, intro_path: Path | None, intro_over: str, preview_intro: bool,
          ai_url: str | None, ai_model: str | None, ai_fast: bool, plan_path: Path | None,
          structure: str, top_n: int | None, cold_open_seconds: float, submit_url: str, description_path: Path | None,
-         thumbnail_path: Path | None, thumbnail_count: int, flat_thumbnails: bool,
+         thumbnail_path: Path | None, thumbnail_count: int, flat_thumbnails: bool, thumb_style: str, no_thumb_arrow: bool,
          blender_path: Path | None, thumbnails_only: bool, thumb_text: str | None, copy_ai_url: str | None, no_ai_copy: bool,
          kill_padding: float | None, slowmo: str, slowmo_clips: str, slowmo_speed: float, lull_speed: float, transitions: str, snap_cuts_on: bool, music_files: tuple[Path, ...], music_dir: Path | None, sections_by: str, broll_dir: Path | None,
          broll_seconds: float, music_volume: float, music_start: float | None,
@@ -554,7 +567,8 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
         if thumbnail_path:
             _write_thumbnails(ffmpeg, mains, timeline, meta, thumbnail_path, thumbnail_count, thumb_text,
                               copy.thumbnail_clips if copy else [],
-                              None if flat_thumbnails else thumb.find_blender(blender_path))
+                              None if flat_thumbnails else thumb.find_blender(blender_path),
+                              style=thumb_style, arrow=not no_thumb_arrow)
         if thumbnails_only:
             return
 

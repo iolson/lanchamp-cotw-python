@@ -77,10 +77,12 @@ def test_thumbnails_lead_with_the_biggest_feat_and_vary_the_callout():
 def test_title_options_lead_with_real_numbers_and_fit():
     info = ep.DescriptionInfo(3, week="Nov 14", league="ESEA")
     titles = ep.title_options(_week(), info)
-    assert titles[0] == "Two Aces & Two 1v4 Clutches in One Week | CS2 Clips of the Week EP.03"
-    assert "Down 1v4. Then This Happened. | CS2 Clips of the Week EP.03" in titles
-    assert "Two Aces From ESEA Open Players This Week | LANChamp EP.03" in titles  # 71 with the long suffix
-    assert all(len(t) <= 70 for t in titles)
+    assert titles[:3] == ["CS2: Two Aces & Two 1v4 Clutches in One Week! #3",
+                          "TOP 7 CS2 Plays This Week That Will Blow Your Mind! #3",
+                          "CS2 | Community Highlights Week 03"]
+    assert "CS2: Down 1v4. Then This Happened. #3" in titles
+    assert "CS2: Two Aces From ESEA Open Players This Week #3" in titles
+    assert all(len(t) <= 70 and t.startswith(("CS2", "TOP", "The")) for t in titles)
     facts = ep.episode_facts(_week(), "ESEA")
     assert all(ep.title_is_honest(t, facts) for t in titles)
     assert not ep.title_is_honest("A 1v5 Nobody Saw Coming", facts)
@@ -89,6 +91,8 @@ def test_title_options_lead_with_real_numbers_and_fit():
     assert not ep.title_is_honest("One Ace in One Week", facts)  # undercounting is wrong too
     assert not ep.title_is_honest("Three 1v4 Clutches", facts) and ep.title_is_honest("Two 1v4 Clutches", facts)
     assert not ep.title_is_honest("9 Clutches This Week", facts) and ep.title_is_honest("4 Clutches Won", facts)
+    assert not ep.title_is_honest("TOP 100 CS2 Plays", facts) and ep.title_is_honest("TOP 7 CS2 Plays", facts)
+    assert not ep.title_is_honest("The Insane 1v4 Clutch That Broke The Game", facts)
 
 
 def test_intro_line_leads_with_the_numbers():
@@ -145,4 +149,4 @@ def test_countdown_ranks_by_score_and_plays_lowest_first():
 def test_countdown_description_names_ranks():
     tl = relayout(ep.countdown_order([_clip(1, "a", 5), _clip(2, "b", 9)]))
     text = ep.description(tl, ep.DescriptionInfo(3, league="ESEA", top_n=2), lead=10.0)
-    assert "Top 2 ESEA CS2 Plays" in text and "#2 a" in text and "#1 b" in text
+    assert "TOP 2 CS2 Plays" in text and "#2 a" in text and "#1 b" in text

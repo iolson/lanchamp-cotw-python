@@ -212,44 +212,55 @@ def _count(n: int, noun: str) -> str:
 
 
 def title_options(timeline: Timeline, info: "DescriptionInfo", limit: int = 70) -> list[str]:
-    """Hook-first titles built only from the episode's stats, strongest first; the series name goes last so
-    the hook survives truncation. They name what the episode holds without repeating one thumbnail's callout."""
+    """Titles in the shape that gets clicked in game-highlight search: the game first (it is what people
+    search), a big real number or stake, and a short series number last (`#3`), e.g.
+    `CS2: Three Aces & Two 1v4 Clutches in One Week! #3`, `TOP 35 CS2 Plays This Week That Will Blow Your
+    Mind! #3`, `CS2 | Community Highlights Week 03`. Built only from the episode's stats, strongest first."""
     f = episode_facts(timeline, info.league)
-    tag = f"EP.{info.episode:02d}"
-    suffixes = (f" | CS2 Clips of the Week {tag}", f" | LANChamp {tag}", "")
-    hooks: list[str] = []
+    n = f"#{info.episode}"
     big = f.biggest_clutch
-    if f.aces or big >= 3:
-        parts = []
-        if f.aces:
-            parts.append(_count(f.aces, "Ace"))
-        if big >= 3:
-            parts.append(_count(f.clutches[big], f"1v{big} Clutch"))
-        hooks.append(" & ".join(parts) + " in One Week")
+    clutches = sum(f.clutches.values())
+    feats = []
+    if f.aces:
+        feats.append(_count(f.aces, "Ace"))
     if big >= 3:
-        hooks.append(f"Down 1v{big}. Then This Happened.")
+        feats.append(_count(f.clutches[big], f"1v{big} Clutch"))
+    titles: list[str] = []
+    if feats:
+        titles.append(f"CS2: {' & '.join(feats)} in One Week! {n}")
+    count = info.top_n or f.clips
+    titles.append(f"TOP {count} CS2 Plays This Week That Will Blow Your Mind! {n}")
+    titles.append(f"CS2 | Community Highlights Week {info.episode:02d}")
+    if clutches >= 3:
+        titles.append(f"The Most Satisfying CS2 Clutches This Week {n}")
+    if big >= 3:
+        titles.append(f"CS2: Down 1v{big}. Then This Happened. {n}")
     if f.aces and f.ace_divisions:
         div = max(set(f.ace_divisions), key=f.ace_divisions.count)
-        n = f.ace_divisions.count(div)
-        hooks.append(f"{_count(n, 'Ace')} From {div} Players This Week")
-    if sum(f.clutches.values()) >= 3:
-        hooks.append(f"{sum(f.clutches.values())} Clutches, {f.clips} Plays, One Week")
-    if info.top_n:
-        hooks.append(f"Top {info.top_n} {info.league + ' ' if info.league else ''}CS2 Plays of the Week")
-    hooks.append(f"The Best {info.league + ' ' if info.league else ''}Plays This Week")
+        titles.append(f"CS2: {_count(f.ace_divisions.count(div), 'Ace')} From {div} Players This Week {n}")
+    titles.append(f"CS2 Highlights {n}: Best Kills & Clutches of the Week")
     out = []
-    for h in hooks:
-        h = h[0].upper() + h[1:]
-        title = next((h + sfx for sfx in suffixes if len(h + sfx) <= limit), h[:limit])
-        if title not in out:
-            out.append(title)
+    for t in titles:
+        if len(t) > limit:  # drop the series number before anything else
+            t = t.rsplit(" #", 1)[0]
+        if len(t) <= limit and t not in out:
+            out.append(t)
     return out
 
 
+# claims no stat can back up (and "insane" reads as filler); a model title using one is dropped
+UNBACKED = ("broke the game", "world record", "record", "pro player", "hack", "cheat", "insane", "impossible", "never seen")
+
+
 def title_is_honest(title: str, facts: Facts) -> bool:
-    """False when a title gets a number wrong: a clutch size the episode does not have, or an ace or clutch
-    count that is not the real one (fewer is wrong too: "2 aces" in a three-ace week)."""
+    """False when a title gets a number wrong: a clutch size the episode does not have, or an ace, clutch or
+    "TOP N" count that is not the real one (fewer is wrong too: "2 aces" in a three-ace week)."""
     t = title.lower()
+    if any(w in t for w in UNBACKED):
+        return False
+    for n in re.findall(r"\btop\s+(\d+)\b", t):  # "TOP 35 plays" must be the episode's clip count
+        if int(n) != facts.clips:
+            return False
     for n in re.findall(r"1\s*v\s*(\d)", t):
         if int(n) not in facts.clutches:
             return False

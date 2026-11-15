@@ -232,6 +232,13 @@ They lead with the most striking feat (1v5 > 1v4 > ace > 1v3 > 4K), not the high
 different callout while there are different ones, so the three suit YouTube's thumbnail test (Test & Compare).
 The model's thumbnail picks, when there are any, come first. The callout is never the model's.
 
+`--thumb-style punch` is the louder alternative, in the look of the most-viewed game highlight channels: a
+saturated frame, a huge brand-gold 3D callout top left on blue-deep sides with a thick ink edge, a gold arrow at
+the crosshair, and a compact `CLIPS OF THE WEEK · LANCHAMP · #3` badge bottom left with the player bottom right.
+The frame is taken at the moment of the last kill, so the crosshair is usually on the enemy. If it isn't (a
+kill through smoke, say), use `--no-thumb-arrow`. Render both styles to compare, e.g. `--thumb-style punch
+--thumbnail output/ep03-punch.jpg --thumbnails-only`.
+
 The callout is rendered as extruded, bevelled 3D text in Blender (`src/cotw/blender_text.py`: Space Grotesk
 Bold, a white face and cyan sides, about 3 s for all three) and laid on with a drop shadow and accent
 glow. Blender is found via `--blender`, `$BLENDER`, `PATH` or `/Applications/Blender.app`; without it, or with

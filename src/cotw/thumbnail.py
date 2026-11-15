@@ -6,13 +6,14 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
-from PIL import Image, ImageChops, ImageFilter, ImageStat
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageStat
 
 from cotw.canvas import Canvas, color
 from cotw.compose import FfmpegError
@@ -79,10 +80,16 @@ def find_blender(explicit: Path | None = None) -> Path | None:
     return None
 
 
-def render_callouts(blender: Path, items: list[tuple[str, str]]) -> list[Image.Image]:
-    """Extruded 3D renders of each (text, accent colour) from Blender, cropped to the text (RGBA)."""
+STYLES = ("classic", "punch")
+PUNCH_FACE, PUNCH_SIDE = GOLD, "#11425B"  # brand gold letters on brand blue-deep sides
+
+
+def render_callouts(blender: Path, items: list[tuple[str, str]], face: str = WHITE) -> list[Image.Image]:
+    """Extruded 3D renders of each (text, side colour) from Blender with `face` letter fronts, cropped to the
+    text (RGBA)."""
     with tempfile.TemporaryDirectory(prefix="cotw-3d-") as tmp:
-        jobs = [{"text": t.upper(), "accent": a, "out": str(Path(tmp) / f"{i}.png")} for i, (t, a) in enumerate(items)]
+        jobs = [{"text": t.upper(), "accent": a, "face": face, "out": str(Path(tmp) / f"{i}.png")}
+                for i, (t, a) in enumerate(items)]
         job = Path(tmp) / "job.json"
         job.write_text(json.dumps({"font": str(Path(__file__).parent / "fonts" / "SpaceGrotesk-Bold.ttf"),
                                    "jobs": jobs}), encoding="utf-8")
@@ -155,3 +162,98 @@ def save(img: Image.Image, path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     img.convert("RGB").resize(OUT_SIZE, Image.LANCZOS).save(path, quality=92, optimize=True)
     return path
+
+
+def _outline(img: Image.Image, width: int, fill: str) -> Image.Image:
+    """`img` on a thick rounded outline of `fill` (the sticker edge highlight thumbnails use)."""
+    pad = width + 4
+    a = Image.new("L", (img.width + 2 * pad, img.height + 2 * pad), 0)
+    a.paste(img.getchannel("A"), (pad, pad))
+    grown = a.filter(ImageFilter.MaxFilter(2 * (width // 2) + 1))
+    if width > 12:  # MaxFilter sizes are capped in practice; grow in two steps for thick edges
+        grown = grown.filter(ImageFilter.MaxFilter(2 * ((width - width // 2) // 2) + 1))
+    edge = Image.new("RGBA", a.size, color(fill))
+    edge.putalpha(grown.filter(ImageFilter.GaussianBlur(1.2)))
+    edge.alpha_composite(img, (pad, pad))
+    return edge
+
+
+def _arrow(tail: tuple[float, float], tip: tuple[float, float], fill: str, edge: str) -> Image.Image:
+    """A fat arrow from `tail` to `tip` with a dark edge and a drop shadow, on a transparent 1920x1080 layer."""
+    (x0, y0), (x1, y1) = tail, tip
+    ang = math.atan2(y1 - y0, x1 - x0)
+    length = math.hypot(x1 - x0, y1 - y0)
+    shaft, head_w, head_l = 48, 142, 124
+
+    def pt(along: float, side: float) -> tuple[float, float]:
+        return (x0 + along * math.cos(ang) - side * math.sin(ang), y0 + along * math.sin(ang) + side * math.cos(ang))
+
+    poly = [pt(0, -shaft / 2), pt(length - head_l, -shaft / 2), pt(length - head_l, -head_w / 2), pt(length, 0),
+            pt(length - head_l, head_w / 2), pt(length - head_l, shaft / 2), pt(0, shaft / 2)]
+    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    shadow = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(shadow).polygon([(x + 10, y + 14) for x, y in poly], fill=170)
+    sh = Image.new("RGBA", (W, H), color(INK))
+    sh.putalpha(shadow.filter(ImageFilter.GaussianBlur(14)))
+    layer.alpha_composite(sh)
+    d = ImageDraw.Draw(layer)
+    d.polygon(poly, fill=color(fill), outline=color(edge), width=10)
+    return layer
+
+
+def render_punch(frame: Image.Image, meta: EpisodeMeta, text: str, player: str = "", team: str = "",
+                 callout: Image.Image | None = None, arrow: bool = True) -> Image.Image:
+    """The punchier thumbnail, in the shape of the most-viewed game highlight channels: a saturated frame,
+    a huge gold callout top left with a thick dark edge, a gold arrow at the crosshair (the frame is the
+    moment of the kill, so that is where the enemy is) and a compact series badge bottom left."""
+    img = _cover(frame)
+    img = ImageEnhance.Contrast(ImageEnhance.Color(img).enhance(1.3)).enhance(1.08)
+    base = img.convert("RGBA")
+    # a soft dark corner top left (callout) and along the bottom (badge), not the whole left half
+    shade = Image.new("L", (W, H), 0)
+    d = ImageDraw.Draw(shade)
+    d.ellipse((-700, -520, 1150, 640), fill=150)
+    d.rectangle((0, H - 210, W, H), fill=170)
+    tint = Image.new("RGBA", (W, H), color(INK))
+    tint.putalpha(shade.filter(ImageFilter.GaussianBlur(120)))
+    base.alpha_composite(tint)
+
+    box_w, box_h, x, y = W * 0.52, H * 0.40, 56, 44
+    if callout is not None:
+        k = min(box_w / callout.width, box_h / callout.height)
+        art = _outline(callout.resize((round(callout.width * k), round(callout.height * k)), Image.LANCZOS), 18, INK)
+    else:
+        c = Canvas()
+        size = c.fit_size(text.upper(), "display", 700, 400, 0, box_w)
+        c.text(text, 40, 40 + size * 0.8, family="display", weight=700, size=size, fill=color(GOLD), upper=True)
+        flat = c.finish()
+        flat = flat.crop(flat.getchannel("A").getbbox())
+        art = _outline(flat, 18, INK)
+    base.alpha_composite(art, (x - 20, y - 20))
+    if arrow:  # from just right of the callout towards the crosshair, stopping short of it
+        cx, cy = W / 2, H / 2
+        tail = (min(W * 0.62, x + art.width + 40), max(y + art.height * 0.55, H * 0.26))
+        dx, dy = cx - tail[0], cy - tail[1]
+        dist = max(1.0, (dx * dx + dy * dy) ** 0.5)
+        if dist < 160:  # too close to aim: come in from above-right instead
+            tail = (cx + 260, cy - 260)
+            dx, dy, dist = cx - tail[0], cy - tail[1], 367.7
+        stop = 70 / dist
+        tip = (cx - dx * stop, cy - dy * stop)
+        base.alpha_composite(_arrow(tail, tip, GOLD, INK))
+
+    c = Canvas()  # series badge, bottom left
+    bx, by, mark_s = 56, H - 150, 78
+    c.rect(bx - 18, by - 16, 560, mark_s + 32, color(INK, 0.82), radius=14)
+    _mark(c, bx, by, mark_s)
+    c.text("Clips of the Week", bx + mark_s + 18, by + 40, family="display", weight=700, size=40, fill=color(WHITE),
+           upper=True)
+    c.text(f"LANChamp · #{meta.episode}", bx + mark_s + 18, by + 74, family="mono", weight=600, size=22, ls=4,
+           fill=color(CYAN), upper=True)
+    sub = " · ".join(p for p in (player, team) if p)
+    if sub:
+        ss = c.fit_size(sub.upper(), "mono", 700, 34, 4, W * 0.5)
+        c.text(sub, W - 56, H - 70, family="mono", weight=700, size=ss, ls=4, fill=color(GOLD), upper=True,
+               align="right", glow=(color(INK, 0.9), 12))
+    base.alpha_composite(c.finish())
+    return base

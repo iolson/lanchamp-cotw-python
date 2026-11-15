@@ -2,7 +2,8 @@
 
     blender -b --factory-startup --python blender_text.py -- job.json
 
-`job.json` is {"font": "<ttf>", "jobs": [{"text": "1V2?!", "accent": "#00ACE7", "out": "<png>"}, ...]}.
+`job.json` is {"font": "<ttf>", "jobs": [{"text": "1V2?!", "accent": "#00ACE7", "face": "#F7FAFC", "out": "<png>"}, ...]}
+("face" is optional, white by default).
 Each PNG is cropped to the text by the caller; the face is the brand white, the extruded sides the
 brand accent (cyan), lit from the upper left with a rim light in the accent colour.
 """
@@ -72,7 +73,7 @@ def _light(scene, name: str, kind: str, energy: float, rgba, location, target=(0
     scene.collection.objects.link(obj)
 
 
-def render(text: str, accent: str, out: str, font_path: str) -> None:
+def render(text: str, accent: str, out: str, font_path: str, face_color: str = "#F7FAFC") -> None:
     scene = _reset()
     curve = bpy.data.curves.new("callout", "FONT")
     curve.body = text
@@ -90,7 +91,7 @@ def render(text: str, accent: str, out: str, font_path: str) -> None:
     bpy.ops.object.convert(target="MESH")
     obj = bpy.context.view_layer.objects.active
 
-    face = _material("face", _rgb("#F7FAFC"), 0.0, 0.32, emission=0.2)
+    face = _material("face", _rgb(face_color), 0.0, 0.32, emission=0.2)
     side = _material("side", _rgb(accent), 0.35, 0.3, emission=0.25)  # keeps the accent saturated in shadow
     obj.data.materials.append(face)
     obj.data.materials.append(side)
@@ -129,7 +130,7 @@ def render(text: str, accent: str, out: str, font_path: str) -> None:
 def main() -> None:
     job = json.loads(open(sys.argv[sys.argv.index("--") + 1], encoding="utf-8").read())
     for item in job["jobs"]:
-        render(item["text"], item["accent"], item["out"], job["font"])
+        render(item["text"], item["accent"], item["out"], job["font"], item.get("face", "#F7FAFC"))
 
 
 if __name__ == "__main__":
