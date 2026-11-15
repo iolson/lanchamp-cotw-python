@@ -11,7 +11,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from cotw.graphics import H, STAT_TOTAL, W
-from cotw.plan import Timeline, clip_segments
+from cotw.plan import Timeline, clip_segments, screen_time
 
 FADE = 0.5  # title/end card fade length, seconds
 LT_FADE = 0.3  # lower-third alpha fade in/out
@@ -274,7 +274,8 @@ def build_args(
         if clip.jumps:  # drop the cut stretches; the remaining frames keep their source times for the retime
             gone = "+".join(f"between(t,{_num(a)},{_num(b)})" for a, b in clip.jumps)
             retime = f"setpts=PTS-STARTPTS,select='not({gone})'," + retime
-        g.chain(f"[{idx}:v]{retime}fps={fps},scale={size},setsar=1[mv{k}]")
+        hold = f",tpad=stop_mode=clone:stop_duration={_num(clip.hold)}" if clip.hold else ""
+        g.chain(f"[{idx}:v]{retime}fps={fps},scale={size},setsar=1{hold}[mv{k}]")
         if mi.has_audio:
             g.chain(f"[{idx}:a:0]aresample=48000,aformat=channel_layouts=stereo,asplit={len(segs)}"
                     + "".join(f"[as{k}_{j}]" for j in range(len(segs))))
@@ -291,10 +292,12 @@ def build_args(
             audio = ("".join(f"[ap{k}_{j}]" for j in range(len(segs)))
                      + f"concat=n={len(segs)}:v=0:a=1" if len(segs) > 1 else f"[ap{k}_0]anull")
         else:
-            audio = f"[{silence(shown)}:a]anull"
+            audio = f"[{silence(shown + clip.hold)}:a]anull"
         fades = []
         if clip.trimmed:  # tiny fades so the cuts don't click
             fades += [f"afade=t=in:d={CUT_FADE}", f"afade=t=out:st={_num(max(0.0, shown - CUT_FADE))}:d={CUT_FADE}"]
+        if clip.hold and mi.has_audio:  # the frozen frame is silent; the music carries it
+            fades.append(f"apad=pad_dur={_num(clip.hold)}")
         g.chain(audio + "".join("," + f for f in fades) + f"[ma{k}]")
         pieces.append(f"[mv{k}][ma{k}]")
     g.chain(f"{''.join(pieces)}concat=n={len(pieces)}:v=1:a=1[v0][amain]")
@@ -341,6 +344,8 @@ def build_args(
             overlay(f"rp{clip.number}", (s, s + d))
         if clip.number in assets.punches:
             s = start + opts.punch_delay + (opts.rank_seconds if clip.number in assets.rank_plates else 0.0)
+            if clip.clutch_at:  # a 4K that turns into a 1v2: punch the clutch when it starts, not on the first kill
+                s = max(s, min(start + screen_time(clip, clip.clutch_at), start + clip.duration - STAT_TOTAL))
             i = g.add_input("-framerate", str(opts.punch_fps), "-i", str(assets.punches[clip.number] / "%03d.png"))
             g.chain(
                 f"[{i}:v]{rgba},fade=t=out:st={_num(STAT_TOTAL - PUNCH_FADE_OUT)}:d={PUNCH_FADE_OUT}:alpha=1,"

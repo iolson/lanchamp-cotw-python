@@ -368,3 +368,33 @@ def test_long_lulls_are_jump_cut_and_short_ones_fast_forwarded():
     assert any(abs(o - 23.5) < 0.05 for o, _, _ in segs)
     assert abs(c.duration - sum(l / sp for _, l, sp in segs)) < 1e-6 and c.duration < 15.0
     assert apply_fastforward(tl, 4.0).clips[0].jumps == ()  # jump_min 0: no jump cuts
+
+
+def test_clutch_start_is_kept_for_the_stat_punch():
+    from cotw.plan import apply_fastforward, screen_time
+    r = _clutch_report()
+    r["sequences"][0]["events"].insert(1, {"type": "clutch_start", "seconds_from_clip_start": 12.0, "steamid": "7"})
+    tl = build_timeline(r, kill_padding=2.5)  # trimmed clip starts at 16.9, so the clutch was already on
+    assert tl.clips[0].clutch_at == 0.0
+    r["sequences"][0]["events"][1]["seconds_from_clip_start"] = 40.9  # starts after the first two kills
+    tl = build_timeline(r, kill_padding=2.5)
+    c = tl.clips[0]
+    assert abs(c.clutch_at - 24.0) < 1e-6
+    assert abs(screen_time(c, c.clutch_at) - 24.0) < 1e-6  # no retiming: screen time is source time
+    cut = apply_fastforward(tl, 4.0, jump_min=10.0).clips[0]  # jump cut over 4.0..23.5
+    assert abs(screen_time(cut, 10.0) - 4.0) < 1e-6  # a moment inside the cut lands right after it
+    assert screen_time(cut, cut.clutch_at) < c.clutch_at - 19.0
+    assert build_timeline(_clutch_report(), kill_padding=2.5).clips[0].clutch_at == 0.0  # no clutch_start event
+
+
+def test_match_point_clip_stops_before_the_victory_screen():
+    r = _clutch_report()
+    r["rounds"] = 10  # sequence round 10 is the last one: round_end is followed by "VICTORY"
+    r["sequences"][0]["events"].append({"type": "round_end", "seconds_from_clip_start": 49.9})
+    c = build_timeline(r, kill_padding=2.5).clips[0]
+    assert abs(c.src_start + c.src_len - 49.82) < 1e-6 and c.trimmed  # cut just before round_end
+    assert abs(c.hold - 0.88) < 1e-6 and abs(c.duration - (c.src_len + c.hold)) < 1e-6  # the last kill freezes
+    nopad = build_timeline(r).clips[0]
+    assert abs(nopad.src_len - 49.82) < 1e-6 and build_timeline(r).duration == nopad.duration
+    r["rounds"] = 11  # not the last round: untouched
+    assert build_timeline(r, kill_padding=2.5).clips[0].hold == 0.0

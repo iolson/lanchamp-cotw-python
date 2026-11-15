@@ -53,6 +53,8 @@ class ClipPlan:
     match_id: str = ""
     match_url: str = ""
     won_clutch: int = 0  # opponents beaten in a won clutch (1v3 -> 3); 0 when there was none
+    hold: float = 0.0  # seconds the last frame is frozen at the end (a match-point clip cut before "VICTORY")
+    clutch_at: float = 0.0  # source seconds after src_start where that clutch starts (the stat punch waits for it)
     kills_n: int = 0  # kills in the featured moment
     round: int = 0
     rank: int = 0  # countdown position, 1 = best; 0 when the episode is not a countdown
@@ -65,6 +67,7 @@ FAST_AFTER, FAST_BEFORE = 1.5, 2.0  # normal speed kept after a kill and before 
 FAST_MIN = 3.0  # lulls shorter than this (after those margins) play at normal speed
 FAST_RAMP = 0.6  # source seconds easing into / out of fast-forward, inside the lull
 JUMP_MIN = 10.0  # lulls longer than this (after the margins) are jump-cut instead of fast-forwarded
+VICTORY_LEAD = 0.08  # the final round's clip is cut this long before round_end, where the win banner is drawn
 JUMP_BEFORE = 2.5  # normal speed kept before the next kill after a jump cut (the set-up for the fight)
 SLOWMO_MODES = ("none", "last", "special", "headshots", "all")
 Window = tuple[float, float]
@@ -151,12 +154,23 @@ def clip_length(src_len: float, slow: tuple[Window, ...], speed: float, fast: tu
 
 def _length(clip: "ClipPlan", src_len: float, slow: tuple[Window, ...] | None = None) -> float:
     return clip_length(src_len, clip.slow if slow is None else slow, clip.speed, clip.fast, clip.fast_speed,
-                       clip.jumps)
+                       clip.jumps) + clip.hold
 
 
 def clip_segments(clip: "ClipPlan") -> list[tuple[float, float, float]]:
     return build_segments(clip.src_len or clip.duration, clip.slow, clip.speed, clip.fast, clip.fast_speed,
                           clip.jumps)
+
+
+def screen_time(clip: "ClipPlan", t: float) -> float:
+    """Seconds into the clip on screen at which source second `t` (from src_start) plays; a moment
+    inside a jump cut lands on the first frame after the cut."""
+    out = 0.0
+    for off, length, sp in clip_segments(clip):
+        if t < off + length:
+            return out + max(0.0, t - off) / sp
+        out += length / sp
+    return out
 
 
 def _slow_windows(kills: tuple[tuple[float, bool, bool], ...], mode: str, src_len: float) -> tuple[Window, ...]:
@@ -327,13 +341,31 @@ def _featured_kills(seq: dict, steamid: str) -> list[dict]:
     return out
 
 
-def _clutch_end(seq: dict, steamid: str) -> float | None:
-    """When the featured player's won clutch ends (a defuse can come after the last kill)."""
+def _clutch_event(seq: dict, steamid: str, kind: str) -> float | None:
     for e in seq.get("events") or []:
-        if (e.get("type") == "clutch_end" and "seconds_from_clip_start" in e
+        if (e.get("type") == kind and "seconds_from_clip_start" in e
                 and str(e.get("steamid") or steamid) == steamid):
             return float(e["seconds_from_clip_start"])
     return None
+
+
+def _clutch_end(seq: dict, steamid: str) -> float | None:
+    """When the featured player's won clutch ends (a defuse can come after the last kill)."""
+    return _clutch_event(seq, steamid, "clutch_end")
+
+
+def _match_end(seq: dict, rounds: int) -> float | None:
+    """When the match's last round ends inside this sequence; the "VICTORY" screen and MVP lineup follow."""
+    if not rounds or int(seq.get("round") or 0) != rounds:
+        return None
+    ends = [float(e["seconds_from_clip_start"]) for e in seq.get("events") or []
+            if e.get("type") == "round_end" and "seconds_from_clip_start" in e]
+    return min(ends) if ends else None
+
+
+def _clutch_start(seq: dict, steamid: str) -> float | None:
+    """When the featured player's clutch starts; a 4K can be two kills in before it turns into a 1v2."""
+    return _clutch_event(seq, steamid, "clutch_start")
 
 
 def build_timeline(
@@ -388,6 +420,11 @@ def build_timeline(
         player = best.get("player") or cam.get("name", "")
         steamid = str(best.get("steamid") or cam.get("steamid") or "")
         lead, trimmed = 0.0, False
+        full = dur  # what this sequence takes up in the source video, cut or not
+        match_end = _match_end(seq, int(report.get("rounds") or 0))
+        capped = match_end is not None and match_end - VICTORY_LEAD < dur
+        if capped:
+            dur = max(0.5, match_end - VICTORY_LEAD)
         kl = list(kills.get(seq["number"]) or []) if exact else None
         own = _featured_kills(seq, steamid)
         if kl is not None:
@@ -397,16 +434,19 @@ def build_timeline(
         clutch = best.get("clutch")
         won = bool(clutch and clutch.get("won"))
         end = _clutch_end(seq, steamid) if won and ks else None
+        clutch_start = _clutch_start(seq, steamid) if won else None
         if kill_padding is not None and ks:
             last = max(ks + ([end] if end is not None else []))
             lo, hi = max(0.0, min(ks) - kill_padding), min(dur, last + kill_padding)
-            lead, trimmed = lo, hi - lo < dur - 0.05
+            lead, trimmed = lo, hi - lo < dur - 0.05 or capped
             seq_dur, dur = dur, hi - lo
         else:
-            seq_dur = dur
+            seq_dur, trimmed = dur, capped
         src_len = dur
         src_max = seq_dur - lead
         min_src = min(src_len, max(ks + ([end] if end is not None else [])) - lead + TAIL_AFTER_KILL) if ks else src_len
+        # a match-winning kill right on the cut gets a short freeze instead of the win screen
+        hold = max(0.0, TAIL_AFTER_KILL - (src_len - (max(ks) - lead))) if capped and ks else 0.0
         kills_n = max(int(best.get("kills") or 0), len(own))
         detail = str(best.get("description") or "")
         if best and kills_n > int(best.get("kills") or 0):
@@ -419,18 +459,19 @@ def build_timeline(
         info = _lookup(player, steamid, names or {})
         mc = match_context(report, steamid, player)  # names.json overrides FACEIT, which beats the in-game name
         clips.append(
-            ClipPlan(seq["number"], out, dur, info.name or mc.nickname or player, stat, context, punch,
+            ClipPlan(seq["number"], out, dur + hold, info.name or mc.nickname or player, stat, context, punch,
                      info.team or mc.team or "",
                      opponent=mc.opponent, division=mc.division, match_id=mc.match_id, match_url=mc.url,
                      won_clutch=int(clutch["opponents"]) if won else 0,
+                     hold=hold, clutch_at=max(0.0, clutch_start - lead) if clutch_start is not None else 0.0,
                      kills_n=kills_n, round=int(seq.get("round") or 0),
                      score=float(best.get("score", 0)), src_start=t + lead, trimmed=trimmed,
                      src_len=src_len, src_max=src_max, min_src=min_src,
                      kills=tuple((k["t"] - lead, k["headshot"], k["special"]) for k in kl or []),
                      detail=detail, map=_map_slug(report.get("map", "")))
         )
-        t += seq_dur
-        out += dur
+        t += full
+        out += dur + hold
     return Timeline(clips, out)
 
 

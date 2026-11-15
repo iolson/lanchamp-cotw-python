@@ -40,6 +40,22 @@ def test_lower_third_and_punch_are_timed_to_their_clip():
     assert "[st1]" not in g  # clip 1 has no punch
 
 
+def test_punch_waits_for_a_clutch_that_starts_mid_clip():
+    clip = ClipPlan(2, 10.0, 20.0, "b", "4K + 1V2 CLUTCH", "ctx", Punch("CLUTCH", "1v2", ""), clutch_at=8.0)
+    g = _graph(build_args(MAIN, Timeline([TL.clips[0], clip], 30.0), _assets(), Options(), Path("out.mp4")))
+    assert "setpts=PTS+18/TB[st2]" in g  # 8s in, when the 1v2 starts, not on the first kill
+    late = ClipPlan(2, 10.0, 20.0, "b", "4K + 1V2 CLUTCH", "ctx", Punch("CLUTCH", "1v2", ""), clutch_at=19.5)
+    g = _graph(build_args(MAIN, Timeline([TL.clips[0], late], 30.0), _assets(), Options(), Path("out.mp4")))
+    assert "setpts=PTS+28.35/TB[st2]" in g  # pulled back so the whole punch plays before the clip ends
+
+
+def test_held_clip_freezes_its_last_frame_with_silence():
+    tl = Timeline([ClipPlan(1, 0.0, 10.8, "a", "3K", "c", None, src_len=10.0, hold=0.8, trimmed=True)], 10.8)
+    g = _graph(build_args(MAIN, tl, _assets(lower_thirds={}, punches={}), Options(), Path("o.mp4")))
+    assert "setsar=1,tpad=stop_mode=clone:stop_duration=0.8[mv0]" in g
+    assert "apad=pad_dur=0.8[ma0]" in g
+
+
 def test_overlay_end_card_has_no_extra_segment():
     opts = Options(end_mode="overlay")
     g = _graph(build_args(MAIN, TL, _assets(), opts, Path("out.mp4")))
