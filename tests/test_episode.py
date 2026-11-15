@@ -54,6 +54,46 @@ def test_callout_is_accurate():
     assert ep.callout(_clip(1, "a", 1, won=5)) == "1V5?!"
     assert ep.callout(_clip(1, "a", 1, kills_n=5)) == "ACE?!"
     assert ep.callout(_clip(1, "a", 1, kills_n=1)) == "HOW?!"
+    assert ep.callout(_clip(1, "a", 1, kills_n=4, won=2)) == "4K CLUTCH"  # not the smaller "1V2?!"
+    assert ep.callout(_clip(1, "a", 1, kills_n=2, won=2)) == "1V2?!"
+
+
+def _week():
+    return Timeline([
+        _clip(1, "a", 21.0, kills_n=4, won=2), _clip(2, "b", 19.0, kills_n=4, won=4),
+        _clip(3, "c", 16.0, kills_n=4, won=4), _clip(4, "d", 15.0, kills_n=5, division="ESEA Open 1-8"),
+        _clip(5, "e", 13.0, kills_n=5, division="Open 9-10"), _clip(6, "f", 12.0, kills_n=3, won=3),
+        _clip(7, "g", 10.0, kills_n=3),
+    ], 70.0)
+
+
+def test_thumbnails_lead_with_the_biggest_feat_and_vary_the_callout():
+    picks = ep.thumbnail_picks(_week().clips, 3)
+    assert [ep.callout(c) for c in picks] == ["1V4?!", "ACE?!", "1V3?!"]
+    assert picks[0].number == 2  # the higher-scoring of the two 1v4s
+    assert ep.thumbnail_picks(_week().clips, 2, preferred=[7])[0].number == 7
+
+
+def test_title_options_lead_with_real_numbers_and_fit():
+    info = ep.DescriptionInfo(3, week="Nov 14", league="ESEA")
+    titles = ep.title_options(_week(), info)
+    assert titles[0] == "Two Aces & Two 1v4 Clutches in One Week | CS2 Clips of the Week EP.03"
+    assert "Down 1v4. Then This Happened. | CS2 Clips of the Week EP.03" in titles
+    assert "Two Aces From ESEA Open Players This Week | LANChamp EP.03" in titles  # 71 with the long suffix
+    assert all(len(t) <= 70 for t in titles)
+    facts = ep.episode_facts(_week(), "ESEA")
+    assert all(ep.title_is_honest(t, facts) for t in titles)
+    assert not ep.title_is_honest("A 1v5 Nobody Saw Coming", facts)
+    assert not ep.title_is_honest("Five Aces in One Week", facts)
+    assert ep.title_is_honest("Two Aces and a 1v3", facts)
+    assert not ep.title_is_honest("One Ace in One Week", facts)  # undercounting is wrong too
+    assert not ep.title_is_honest("Three 1v4 Clutches", facts) and ep.title_is_honest("Two 1v4 Clutches", facts)
+    assert not ep.title_is_honest("9 Clutches This Week", facts) and ep.title_is_honest("4 Clutches Won", facts)
+
+
+def test_intro_line_leads_with_the_numbers():
+    line = ep.intro_line(_week(), ep.DescriptionInfo(3, week="Nov 14", league="ESEA"))
+    assert line.startswith("Two aces, two 1v4 clutches and a 1v3 clutch: the 7 best plays from ESEA matches in the week of Nov 14.")
 
 
 def test_stamp():

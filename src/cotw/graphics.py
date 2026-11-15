@@ -159,14 +159,7 @@ def rank_badge(rank: int, total: int) -> Image.Image:
 def title_card(meta: EpisodeMeta, style: str = "center") -> Image.Image:
     c = Canvas()
     _bg_full(c)
-    parts = [meta.ep_tag]
-    if meta.week:
-        parts.append(f"Week of {meta.week}")
-    if meta.featuring:
-        parts.append(meta.featuring)
-    if meta.league:
-        parts.append(meta.league)
-    meta_line = "    ·    ".join(parts)
+    meta_line = _meta_line(meta)
 
     if style == "center":
         _corner_ticks(c, 40, 54)
@@ -192,6 +185,34 @@ def title_card(meta: EpisodeMeta, style: str = "center") -> Image.Image:
         c.rect(lx, 700, 120, 4, color(CYAN))
         ms = c.fit_size(meta_line.upper(), "mono", 500, 26, 4, W - lx - 140)
         c.text(meta_line, lx, 760, family="mono", weight=500, size=ms, ls=4, fill=color(MUTED), upper=True)
+    return c.finish()
+
+
+def _meta_line(meta: EpisodeMeta) -> str:
+    parts = [meta.ep_tag]
+    if meta.week:
+        parts.append(f"Week of {meta.week}")
+    if meta.featuring:
+        parts.append(meta.featuring)
+    if meta.league:
+        parts.append(meta.league)
+    return "    ·    ".join(parts)
+
+
+def intro_backdrop() -> Image.Image:
+    """The title card's background alone, for an intro video with alpha to play over."""
+    c = Canvas()
+    _bg_full(c)
+    _corner_ticks(c, 40, 54)
+    return c.finish()
+
+
+def intro_meta(meta: EpisodeMeta) -> Image.Image:
+    """The episode line (EP.03 · Week of ... · league) under an intro video's logo (transparent)."""
+    c = Canvas()
+    line = _meta_line(meta)
+    ms = c.fit_size(line.upper(), "mono", 500, 26, 4, W - 360)
+    c.text(line, W / 2, 790, family="mono", weight=500, size=ms, ls=4, fill=color(MUTED), align="center", upper=True)
     return c.finish()
 
 

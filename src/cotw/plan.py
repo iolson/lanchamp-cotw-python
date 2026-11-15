@@ -41,6 +41,8 @@ class ClipPlan:
     min_src: float = 0.0  # least source seconds that still keep every kill and a short tail
     slow: tuple[tuple[float, float], ...] = ()  # slow-motion windows, in source seconds from src_start
     speed: float = 0.5  # playback speed inside the slow windows
+    fast: tuple[tuple[float, float], ...] = ()  # fast-forward windows over the lulls between kills
+    fast_speed: float = 1.0  # playback speed inside the fast windows
     kills: tuple[tuple[float, bool, bool], ...] = ()  # (seconds after src_start, headshot, special)
     detail: str = ""  # e.g. "4K (m4a1)"; context for people / the LLM, not shown on screen
     map: str = ""  # e.g. "anubis"; clips of one map form a section
@@ -58,6 +60,9 @@ class ClipPlan:
 SLOW_BEFORE, SLOW_AFTER = 0.30, 0.45  # full slow motion runs from just before a kill to just after it
 RAMP_IN, RAMP_OUT, RAMP_STEPS = 0.30, 0.40, 4  # source seconds easing into / out of slow motion
 TAIL_AFTER_KILL = 0.8  # never cut closer than this to the last kill
+FAST_AFTER, FAST_BEFORE = 1.5, 2.0  # normal speed kept after a kill and before the next one
+FAST_MIN = 3.0  # lulls shorter than this (after those margins) play at normal speed
+FAST_RAMP = 0.6  # source seconds easing into / out of fast-forward, inside the lull
 SLOWMO_MODES = ("none", "last", "special", "headshots", "all")
 Window = tuple[float, float]
 
@@ -77,10 +82,12 @@ def _ramp(start: float, length: float, speed: float, easing_in: bool) -> list[tu
     return out
 
 
-def build_segments(src_len: float, slow: tuple[Window, ...], speed: float) -> list[tuple[float, float, float]]:
+def build_segments(src_len: float, slow: tuple[Window, ...], speed: float, fast: tuple[Window, ...] = (),
+                   fast_speed: float = 1.0) -> list[tuple[float, float, float]]:
     """Split `src_len` source seconds into (offset, length, speed) pieces: normal speed, an ease down to
-    `speed` before each slow window, the window itself, and an ease back up after it."""
-    wins: list[list[float]] = []
+    `speed` before each slow window, the window itself, and an ease back up after it. Fast windows ease
+    up to `fast_speed` and back down inside the window, so the moments around it stay at normal speed."""
+    wins: list[list[float]] = []  # [start, end, speed, ramp in, ramp out]; ramps sit outside start..end
     for a, b in sorted(slow):
         a, b = max(0.0, a), min(src_len, b)
         if b - a < 1e-3:
@@ -88,32 +95,45 @@ def build_segments(src_len: float, slow: tuple[Window, ...], speed: float) -> li
         if wins and a - wins[-1][1] < RAMP_IN + RAMP_OUT:  # ramps would collide: one longer window
             wins[-1][1] = max(wins[-1][1], b)
         else:
-            wins.append([a, b])
+            wins.append([a, b, speed, RAMP_IN, RAMP_OUT])
+    if abs(fast_speed - 1.0) > 1e-6:
+        for a, b in fast:
+            a, b = max(0.0, a) + FAST_RAMP, min(src_len, b) - FAST_RAMP
+            if b - a >= 1e-3:
+                wins.append([a, b, fast_speed, FAST_RAMP, FAST_RAMP])
+        wins.sort()
     out: list[tuple[float, float, float]] = []
     cursor = 0.0
-    for a, b in wins:
-        ramp_start = max(cursor, a - RAMP_IN)
+    for a, b, sp, r_in, r_out in wins:
+        if a < cursor:  # overlaps the previous window's ramp out; skip rather than run backwards
+            continue
+        ramp_start = max(cursor, a - r_in)
         if ramp_start - cursor > 1e-3:
             out.append((cursor, ramp_start - cursor, 1.0))
         if a - ramp_start > 1e-3:
-            out += _ramp(ramp_start, a - ramp_start, speed, True)
-        out.append((a, b - a, speed))
-        ramp_end = min(src_len, b + RAMP_OUT)
+            out += _ramp(ramp_start, a - ramp_start, sp, True)
+        out.append((a, b - a, sp))
+        ramp_end = min(src_len, b + r_out)
         if ramp_end - b > 1e-3:
-            out += _ramp(b, ramp_end - b, speed, False)
+            out += _ramp(b, ramp_end - b, sp, False)
         cursor = ramp_end
     if src_len - cursor > 1e-3 or not out:
         out.append((cursor, src_len - cursor, 1.0))
     return out
 
 
-def clip_length(src_len: float, slow: tuple[Window, ...], speed: float) -> float:
-    """Seconds a clip takes on screen: its source length stretched by slow motion."""
-    return sum(length / sp for _, length, sp in build_segments(src_len, slow, speed))
+def clip_length(src_len: float, slow: tuple[Window, ...], speed: float, fast: tuple[Window, ...] = (),
+                fast_speed: float = 1.0) -> float:
+    """Seconds a clip takes on screen: its source length stretched by slow motion, squeezed by fast-forward."""
+    return sum(length / sp for _, length, sp in build_segments(src_len, slow, speed, fast, fast_speed))
+
+
+def _length(clip: "ClipPlan", src_len: float, slow: tuple[Window, ...] | None = None) -> float:
+    return clip_length(src_len, clip.slow if slow is None else slow, clip.speed, clip.fast, clip.fast_speed)
 
 
 def clip_segments(clip: "ClipPlan") -> list[tuple[float, float, float]]:
-    return build_segments(clip.src_len or clip.duration, clip.slow, clip.speed)
+    return build_segments(clip.src_len or clip.duration, clip.slow, clip.speed, clip.fast, clip.fast_speed)
 
 
 def _slow_windows(kills: tuple[tuple[float, bool, bool], ...], mode: str, src_len: float) -> tuple[Window, ...]:
@@ -266,6 +286,33 @@ def describe_moment(moment: dict) -> tuple[str, Punch | None]:
     return stat, punch
 
 
+def _featured_kills(seq: dict, steamid: str) -> list[dict]:
+    """The featured player's kills from the sequence's event list.
+
+    A report's moment (and so its `beat_targets`) can miss kills: a 3K 1v3 clutch has been listed as
+    a 1K, which trimmed the clip to its first kill.
+    """
+    out = []
+    for e in seq.get("events") or []:
+        if e.get("type") != "kill" or "seconds_from_clip_start" not in e:
+            continue
+        attacker = str((e.get("attacker") or {}).get("steamid") or "")
+        if (attacker != steamid) if steamid else not e.get("is_pov_kill"):
+            continue
+        special = any(e.get(f) for f in ("noscope", "thrusmoke", "attackerblind")) or e.get("weapon") in ("knife", "taser")
+        out.append({"t": float(e["seconds_from_clip_start"]), "headshot": bool(e.get("headshot")), "special": special})
+    return out
+
+
+def _clutch_end(seq: dict, steamid: str) -> float | None:
+    """When the featured player's won clutch ends (a defuse can come after the last kill)."""
+    for e in seq.get("events") or []:
+        if (e.get("type") == "clutch_end" and "seconds_from_clip_start" in e
+                and str(e.get("steamid") or steamid) == steamid):
+            return float(e["seconds_from_clip_start"])
+    return None
+
+
 def build_timeline(
     report: dict,
     *,
@@ -312,40 +359,52 @@ def build_timeline(
     for seq, dur in zip(seqs, durations):
         if exact:
             t = float(seq["video_start_seconds"])
+        moments = seq.get("moments") or []
+        best = max(moments, key=lambda m: m.get("score", 0)) if moments else {}
+        cam = (seq.get("cameras") or [{}])[0]
+        player = best.get("player") or cam.get("name", "")
+        steamid = str(best.get("steamid") or cam.get("steamid") or "")
         lead, trimmed = 0.0, False
-        kl = kills.get(seq["number"]) if exact else None
+        kl = list(kills.get(seq["number"]) or []) if exact else None
+        own = _featured_kills(seq, steamid)
+        if kl is not None:
+            kl += [k for k in own if all(abs(k["t"] - x["t"]) > 0.1 for x in kl)]
+            kl.sort(key=lambda k: k["t"])
         ks = [k["t"] for k in kl or []]
+        clutch = best.get("clutch")
+        won = bool(clutch and clutch.get("won"))
+        end = _clutch_end(seq, steamid) if won and ks else None
         if kill_padding is not None and ks:
-            lo, hi = max(0.0, min(ks) - kill_padding), min(dur, max(ks) + kill_padding)
+            last = max(ks + ([end] if end is not None else []))
+            lo, hi = max(0.0, min(ks) - kill_padding), min(dur, last + kill_padding)
             lead, trimmed = lo, hi - lo < dur - 0.05
             seq_dur, dur = dur, hi - lo
         else:
             seq_dur = dur
         src_len = dur
         src_max = seq_dur - lead
-        min_src = min(src_len, max(ks) - lead + TAIL_AFTER_KILL) if ks else src_len
-        moments = seq.get("moments") or []
-        best = max(moments, key=lambda m: m.get("score", 0)) if moments else {}
+        min_src = min(src_len, max(ks + ([end] if end is not None else [])) - lead + TAIL_AFTER_KILL) if ks else src_len
+        kills_n = max(int(best.get("kills") or 0), len(own))
+        detail = str(best.get("description") or "")
+        if best and kills_n > int(best.get("kills") or 0):
+            best = {**best, "kills": kills_n}
+            detail = re.sub(r"^\d+K\b( \([^)]*\))?", _kills_label(kills_n), detail)
         stat, punch = describe_moment(best) if best else (seq.get("label", "HIGHLIGHT").upper(), None)
         context = " · ".join(p for p in (map_name, f"Round {seq['round']}" if "round" in seq else "") if p)
         if punch and not punch.context:
             punch = Punch(punch.label, punch.value, context)
-        cam = (seq.get("cameras") or [{}])[0]
-        player = best.get("player") or cam.get("name", "")
-        steamid = str(best.get("steamid") or cam.get("steamid") or "")
         info = _lookup(player, steamid, names or {})
         mc = match_context(report, steamid, player)  # names.json overrides FACEIT, which beats the in-game name
-        clutch = best.get("clutch")
         clips.append(
             ClipPlan(seq["number"], out, dur, info.name or mc.nickname or player, stat, context, punch,
                      info.team or mc.team or "",
                      opponent=mc.opponent, division=mc.division, match_id=mc.match_id, match_url=mc.url,
-                     won_clutch=int(clutch["opponents"]) if clutch and clutch.get("won") else 0,
-                     kills_n=int(best.get("kills") or 0), round=int(seq.get("round") or 0),
+                     won_clutch=int(clutch["opponents"]) if won else 0,
+                     kills_n=kills_n, round=int(seq.get("round") or 0),
                      score=float(best.get("score", 0)), src_start=t + lead, trimmed=trimmed,
                      src_len=src_len, src_max=src_max, min_src=min_src,
                      kills=tuple((k["t"] - lead, k["headshot"], k["special"]) for k in kl or []),
-                     detail=str(best.get("description") or ""), map=_map_slug(report.get("map", "")))
+                     detail=detail, map=_map_slug(report.get("map", "")))
         )
         t += seq_dur
         out += dur
@@ -456,15 +515,15 @@ def snap_cuts_multi(timeline: Timeline, beats: list[list[float]], switches: list
         src_len = clip.src_len or clip.duration
         src_max = max(clip.src_max, src_len)
         min_src = min(clip.min_src or src_len, src_len)
-        lo = clip_length(min_src, clip.slow, clip.speed)
-        hi = clip_length(src_max, clip.slow, clip.speed)
+        lo = _length(clip, min_src)
+        hi = _length(clip, src_max)
         want = at + clip.duration
         beat = min((b for b in grid if at + lo <= b <= at + hi), key=lambda b: abs(b - want), default=None)
         if beat is not None:
             new_len = beat - at
-            extra = clip.duration - src_len  # what slow motion adds; the tail past the ramps is normal speed
+            extra = clip.duration - src_len  # what slow motion adds (fast-forward takes); the tail is normal speed
             new_src = min(src_max, max(min_src, new_len - extra))
-            clip = replace(clip, src_len=new_src, duration=clip_length(new_src, clip.slow, clip.speed),
+            clip = replace(clip, src_len=new_src, duration=_length(clip, new_src),
                            trimmed=clip.trimmed or new_src < clip.src_max - 0.05)
         out.append(replace(clip, start=t))
         t += clip.duration
@@ -568,8 +627,35 @@ def apply_slowmo(
         slow = _slow_windows(clip.kills, mode, src_len) if clip.number in chosen else ()
         if slow:
             min_src = max(clip.min_src or src_len, min(src_len, slow[-1][1] + RAMP_OUT))
-            clip = replace(clip, src_len=src_len, slow=slow, speed=speed, min_src=min_src,
-                           duration=clip_length(src_len, slow, speed))
+            clip = replace(clip, src_len=src_len, slow=slow, speed=speed, min_src=min_src)
+            clip = replace(clip, duration=_length(clip, src_len))
+        out.append(replace(clip, start=t))
+        t += clip.duration
+    return Timeline(out, t)
+
+
+def _fast_windows(kills: tuple[tuple[float, bool, bool], ...], src_len: float) -> tuple[Window, ...]:
+    """The lulls between kills, less a margin of normal speed on each side."""
+    ts = sorted(t for t, _, _ in kills)
+    return tuple(
+        (a + FAST_AFTER, min(src_len, b - FAST_BEFORE)) for a, b in zip(ts, ts[1:])
+        if min(src_len, b - FAST_BEFORE) - (a + FAST_AFTER) >= FAST_MIN
+    )
+
+
+def apply_fastforward(timeline: Timeline, speed: float) -> Timeline:
+    """Speed through the lulls between kills (a 1v3 walking between fights) with eased ramps, so the
+    whole play fits in the episode instead of being cut after the first kill."""
+    if speed <= 1.0:
+        return timeline
+    out: list[ClipPlan] = []
+    t = 0.0
+    for clip in timeline.clips:
+        src_len = clip.src_len or clip.duration
+        fast = _fast_windows(clip.kills, src_len)
+        if fast:
+            clip = replace(clip, src_len=src_len, fast=fast, fast_speed=speed)
+            clip = replace(clip, duration=_length(clip, src_len))
         out.append(replace(clip, start=t))
         t += clip.duration
     return Timeline(out, t)

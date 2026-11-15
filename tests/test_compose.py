@@ -86,7 +86,7 @@ def test_clips_are_cut_from_their_source_video_in_timeline_order():
     joined = " ".join(args)
     assert "-ss 1.5 -t 4 -i b.mp4" in joined and "-ss 0 -t 10 -i a.mp4" in joined
     assert joined.index("b.mp4") < joined.index("a.mp4")
-    assert "[mv0_0][ma0_0][mv1_0][ma1_0]concat=n=2:v=1:a=1[v0][amain]" in g
+    assert "[mv0][ma0][mv1][ma1]concat=n=2:v=1:a=1[v0][amain]" in g
     assert "anullsrc" in joined  # b has no audio
 
 
@@ -97,7 +97,8 @@ def test_music_that_fits_plays_once_and_ends_naturally():
     assert "-stream_loop" not in args
     assert "volume=0.3" in g and "adelay=5000:all=1" in g  # starts after the 5s title card
     assert "apad=whole_dur=50" in g  # 5 + 30 + 15
-    assert "atrim" not in g and "afade=t=out:st=" not in g.split("[mus]")[0]
+    mus = next(c for c in g.split(";") if "volume=0.3" in c)
+    assert "atrim" not in mus and "afade=t=out:st=" not in mus
     assert "sidechaincompress" in g and "amix=inputs=2:duration=first:normalize=0[aout]" in g
 
 
@@ -114,7 +115,7 @@ def test_no_music_keeps_plain_audio_path():
 def test_trimmed_clips_get_audio_fades():
     tl = Timeline([ClipPlan(1, 0.0, 10.0, "a", "3K", "c", None, trimmed=True, src_start=2.0)], 10.0)
     g = _graph(build_args(MAIN, tl, _assets(lower_thirds={}, punches={}), Options(), Path("o.mp4")))
-    assert "afade=t=in:d=0.03" in g and "[mv0_0][ma0_0]" in g
+    assert "afade=t=in:d=0.03" in g and "[mv0][ma0]" in g
 
 
 def test_output_is_60fps_even_from_120fps_sources():
@@ -130,11 +131,12 @@ def test_slow_motion_pieces_are_retimed_with_tape_audio():
     )
     args = build_args(MAIN, tl, _assets(lower_thirds={}, punches={}), Options(), Path("o.mp4"))
     g, joined = _graph(args), " ".join(args)
-    assert "-ss 3 -t 3.7 -i in.mp4" in joined  # normal speed before the ease-in
-    assert "-ss 7 -t 2 -i in.mp4" in joined  # the full-slow window (3 + 4)
-    assert "setpts=(PTS-STARTPTS)/0.5,fps=60" in g
-    assert "asetrate=48000*0.5,aresample=48000,lowpass=f=3200" in g and "atempo" not in g
-    assert g.count("asetrate=") > 1 and "concat=n=11:v=1:a=1[v0][amain]" in g  # eased in and out in steps
+    assert joined.count("-i in.mp4") == 1 and "-ss 3 -t 10 -i in.mp4" in joined  # one input per clip
+    assert "if(lt(ld(0),3.700000),0.000000+(ld(0)-0.000000)/1.000000" in g  # normal speed before the ease-in
+    assert "(ld(0)-4.000000)/0.500000" in g  # the full-slow window
+    assert "atrim=start=4:end=6,asetpts=PTS-STARTPTS,asetrate=48000*0.5,aresample=48000,lowpass=f=3200" in g
+    assert "atempo" not in g and g.count("asetrate=") > 1
+    assert "asplit=11" in g and "concat=n=11:v=0:a=1" in g  # eased in and out in steps
 
 
 def test_transitions_chain_under_the_graphics():
@@ -194,3 +196,26 @@ def test_cli_transitions_dry_run_mentions_the_plan(tmp_path):
 def test_cli_without_transitions_has_no_transition_chain(tmp_path):
     out, graph = _dry_run(tmp_path)
     assert "Transitions" not in out and "vtr" not in graph
+
+
+def test_retime_expression_maps_source_time_through_each_piece():
+    from cotw.compose import _retime_expr
+    segs = [(0.0, 2.0, 1.0), (2.0, 4.0, 4.0), (6.0, 1.0, 0.5)]
+    expr = _retime_expr(segs)
+    def at(t):  # what the if/lt nest computes
+        out = 0.0
+        for off, length, speed in segs:
+            if t < off + length or (off, length, speed) == segs[-1]:
+                return out + (t - off) / speed
+            out += length / speed
+    assert expr.startswith("st(0,(PTS-STARTPTS)*TB);")
+    assert at(1.0) == 1.0 and at(4.0) == 2.5 and at(6.5) == 4.0
+    assert "if(lt(ld(0),2.000000),0.000000+(ld(0)-0.000000)/1.000000," in expr
+    assert "if(lt(ld(0),6.000000),2.000000+(ld(0)-2.000000)/4.000000," in expr
+    assert expr.endswith("3.000000+(ld(0)-6.000000)/0.500000))")
+
+
+def test_fast_forward_audio_chains_atempo_up_to_2x():
+    from cotw.compose import _fast_audio
+    assert _fast_audio(4.0) == ",atempo=2,atempo=2,volume=0.6"
+    assert _fast_audio(1.5) == ",atempo=1.5,volume=0.6"

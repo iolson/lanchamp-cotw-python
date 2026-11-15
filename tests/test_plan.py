@@ -315,3 +315,43 @@ def test_snap_cuts_multi_starts_the_next_song_on_its_first_beat():
     beats2 = [0.3 + i * 0.5 for i in range(200)]
     out, starts = snap_cuts_multi(tl, [beats1, beats2], [2], offset=0.0, music_start=0.0)
     assert starts[0] == 0.0 and starts[1] == pytest.approx(out.clips[2].start - 0.3)
+
+
+def _clutch_report():
+    """A 3K 1v3 whose moment and beat_targets list only the first kill (as an episode 3 report did)."""
+    kill = lambda t, sid, hs=False: {"type": "kill", "seconds_from_clip_start": t, "headshot": hs,
+                                     "attacker": {"steamid": sid}}
+    return {
+        "map": "de_nuke",
+        "sequences": [{
+            "number": 1, "round": 10, "duration_seconds": 53.0, "clip_duration_seconds": 53.0,
+            "video_start_seconds": 0.0,
+            "moments": [{"player": "Willy", "steamid": "7", "kills": 1, "description": "1K (deagle), 1v3 clutch",
+                         "score": 10, "clutch": {"opponents": 3, "won": True, "kills": 3}}],
+            "events": [kill(4.0, "9"), kill(19.4, "7", True), kill(42.9, "7"), kill(49.9, "7"),
+                       {"type": "clutch_end", "seconds_from_clip_start": 49.9, "steamid": "7"}],
+        }],
+        "beat_targets": [{"sequence": 1, "clip_time_seconds": 19.4, "headshot": True, "special": False}],
+    }
+
+
+def test_kill_padding_keeps_every_kill_of_a_clutch_the_report_undercounts():
+    c = build_timeline(_clutch_report(), kill_padding=2.5).clips[0]
+    assert [round(t, 1) for t, _, _ in c.kills] == [2.5, 26.0, 33.0]  # the other team's kill is not one
+    assert c.stat == "3K + 1V3 CLUTCH" and c.kills_n == 3 and c.detail == "3K, 1v3 clutch"
+    assert abs(c.src_start - 16.9) < 1e-6 and abs(c.duration - 35.5) < 1e-6
+
+
+def test_lulls_between_kills_are_fast_forwarded_with_ramps():
+    from cotw.plan import apply_fastforward
+    tl = build_timeline(_clutch_report(), kill_padding=2.5)
+    c = apply_fastforward(tl, 4.0).clips[0]
+    assert [tuple(round(x, 1) for x in w) for w in c.fast] == [(4.0, 24.0), (27.5, 31.0)]
+    segs = clip_segments(c)
+    assert max(sp for _, _, sp in segs) == 4.0 and segs[0][2] == 1.0 and segs[-1][2] == 1.0
+    assert abs(sum(l for _, l, _ in segs) - c.src_len) < 1e-6  # every source second is played
+    for t, _, _ in c.kills:  # kills themselves play at normal speed
+        assert next(sp for o, l, sp in segs if o <= t < o + l) == 1.0
+    assert c.duration < 20.0 and apply_fastforward(tl, 1.0).clips[0].fast == ()
+    s = apply_slowmo(apply_fastforward(tl, 4.0), "last", select="all").clips[0]
+    assert s.fast == c.fast and s.slow and abs(s.duration - sum(l / sp for _, l, sp in clip_segments(s))) < 1e-6

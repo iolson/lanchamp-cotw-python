@@ -11,6 +11,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from cotw.episode import episode_facts
 from cotw.plan import ClipPlan, Timeline
 
 SYSTEM = (
@@ -244,18 +245,25 @@ def suggest_copy(
     model = model or _first_model(base, timeout)
     clips = [clip_brief(c) | {"team": c.team, "opponent": c.opponent, "division": c.division}
              for c in timeline.clips if not c.broll]
+    facts = episode_facts(timeline, league).as_dict()
     prompt = (
         f"Write YouTube copy for LANChamp Clips of the Week EP.{episode:02d}"
-        f"{' (' + league + ' matches)' if league else ''}. Use only facts in the clip list; never invent "
-        "names, teams, scores or feats.\n"
-        "1. 'titles': three title options, each under 70 characters, written for CS2 viewers. The thumbnail "
-        "carries the big callout (like '1V5?!'), so the title must not repeat it; name the series or the "
-        "week's theme instead.\n"
-        "2. 'intro': two sentences (under 280 characters) for the top of the description, plain text, no "
-        "hashtags, no emoji.\n"
+        f"{' (' + league + ' matches)' if league else ''}, a weekly CS2 highlights video of amateur league "
+        "players. Use only the facts and clip list below; never invent names, teams, numbers or feats, and "
+        "never claim more than the facts show.\n"
+        "1. 'titles': five title options written to be clicked by CS2 viewers browsing YouTube:\n"
+        "   - put the hook in the first 40 characters (it is all a phone shows) and end with "
+        f"' | CS2 Clips of the Week EP.{episode:02d}' when it fits in 70 characters;\n"
+        "   - use a concrete number or stake from the facts (e.g. how many aces, the biggest won clutch),\n"
+        "     or a curiosity gap the video pays off (a 1v4 that was won, a lower division beating the odds);\n"
+        "   - plain words, title case, at most one word in capitals, no emoji, no hashtags, no 'insane'/'crazy';\n"
+        "   - the thumbnail already shows one big callout like '1V4?!', so do not make the title only that.\n"
+        "   - refer to players by name or as 'they', never 'he' or 'she'.\n"
+        "2. 'intro': two sentences (under 280 characters) for the top of the description: the biggest numbers "
+        "first, then what the video is; plain text, no hashtags, no emoji.\n"
         "3. 'thumbnail_clips': up to three clip numbers whose moments would make the most striking "
-        "thumbnails (clutches, aces and unusual kills beat plain multi-kills), best first.\n\n"
-        f"Clips:\n{json.dumps(clips, indent=1)}"
+        "thumbnails (bigger clutches and aces beat plain multi-kills), best first, each a different kind of feat.\n\n"
+        f"Facts:\n{json.dumps(facts)}\n\nClips:\n{json.dumps(clips, indent=1)}"
     )
     reply = _post(
         base + "/chat/completions",
@@ -269,7 +277,7 @@ def suggest_copy(
     )
     try:
         raw = json.loads(reply["choices"][0]["message"]["content"])
-        titles = [str(t).strip() for t in raw["titles"] if str(t).strip()][:3]
+        titles = [str(t).strip() for t in raw["titles"] if str(t).strip()][:5]
         intro = str(raw["intro"]).strip()
         valid = {c.number for c in timeline.clips if not c.broll}
         picks = [n for n in raw["thumbnail_clips"] if isinstance(n, int) and n in valid]

@@ -76,7 +76,8 @@ cotw files --episode 1 -o output/cotw-ep01.mp4
 | `--reverse` | Flip the order, e.g. `--order score --reverse` for best first |
 | `--seed N` | Repeat a `shuffle` cut |
 | `--pick 3,1,5` / `--skip 2,4` | Use only these clips in this order / leave clips out |
-| `--kill-padding N` | Trim each clip to N seconds before its first kill and after its last (uses the report's `beat_targets`) |
+| `--kill-padding N` | Trim each clip to N seconds before its first kill and after its last (from the report's `beat_targets` plus the featured player's kills in its events, so a 1vX keeps every kill and a won clutch runs to its end) |
+| `--lull-speed X` | Fast-forward the lulls between kills (over 3 s of nothing, keeping 1.5 s after a kill and 2 s before the next) at X with eased ramps (default 4; 1 = off) |
 | `--music FILE` | Music bed: starts after the title card, plays once, ducked under the game audio (`--music-volume`, default 0.25; `--music-start` to move it) |
 | `--slowmo last\|special\|headshots\|all` | Slow motion around kills, eased in and out (off by default). `last` = each clip's final kill; `special`/`headshots` add those kills; `all` slows every kill. Needs 120 fps sources |
 | `--slowmo-clips auto\|all\|3,5` | Which clips get it (default `auto`: signature clips, i.e. clutch/ace/4K, best first, at most a third of the episode) |
@@ -93,6 +94,9 @@ cotw files --episode 1 -o output/cotw-ep01.mp4
 | `--lower-third-scale X` | Lower-third size (default 0.65; 1.0 is the original, larger plate) |
 | `--lower-third-seconds N` | How long each lower third stays up (default 7) |
 | `--title-style center\|cinematic` | Title card style |
+| `--intro VIDEO` | Intro video with alpha (e.g. the Blender `LANChamp_Clips_Reveal.mov`) over the title card's background, with the episode line faded in after the logo lands (timed from its `_events.json`); the title card runs as long as the video |
+| `--intro-over cold\|card` | `cold` (default): the intro plays over the cold open, starting just after its last kill, with the footage blurred, dimmed and running on underneath and the game sound giving way to the music; `card`: after the cold open, over the title card's background |
+| `--preview-intro` | Render only the cold open, the intro and the first clip, to check an intro without the whole episode |
 | `--no-title / --no-bug / --no-lower-thirds / --no-punch` | Drop individual graphics |
 | `--encoder h264_nvenc` | NVIDIA GPU encode, Windows/Linux only (default `libx264`, CRF `--quality 18`) |
 | `--graphics-only DIR` | Render the PNGs/frames to `DIR` and stop, to eyeball the look |
@@ -210,12 +214,29 @@ cold open teases the last one.
 
 `--description FILE` writes the YouTube description from the real final timeline: title options, intro, chapters
 (cold open, intro, the three blocks, outro), per-clip credits with timestamps (player, team, opponent,
-division, map/round) and match links. `--thumbnail FILE.jpg` writes a 1280x720 thumbnail from the best clip
-(`-2`, `-3` ... from the next best; `--thumbnail-count`): a real frame at the last kill, the LANChamp mark and
-episode number in a fixed corner, an accent colour that rotates per episode, and a callout computed from the stats
-(`1V5?!`, `ACE?!`, `3K?!`; override the first with `--thumb-text`). With `--ai` the model also writes three title
-options and the intro and ranks the clips that make the best thumbnails (`--no-ai-copy` skips it); the callout
-is never the model's, so it cannot overstate the clip.
+division, map/round) and match links.
+
+**Titles** are built to be clicked, and only from the episode's stats, so they can't overstate it. The hook comes
+in the first 40 characters (all a phone shows), with a real number or stake, and the series name goes last:
+`Three Aces & Two 1v4 Clutches in One Week | LANChamp EP.03`, `Down 1v4. Then This Happened. | CS2 Clips of the
+Week EP.03`, `Three Aces From ESEA Open Players This Week`, then a clutch count and a plain fallback, each kept
+within 70 characters. The description opens with the same numbers (`Three aces, two 1v4 clutches and six 1v3
+clutches: the 35 best plays ...`). With `--ai URL`, or `--copy-ai URL` for copy only (no edit decisions), the
+model adds up to three titles under the same rules. Any title that gets a number wrong (a clutch size the episode
+doesn't have, an ace or clutch count that isn't the real one) is dropped.
+
+`--thumbnail FILE.jpg` writes 1280x720 thumbnails (`-2`, `-3` ...; `--thumbnail-count`): a real frame at the last
+kill, the LANChamp mark and episode number in a fixed corner, the brand colours (cyan accent, a gold tick), and a
+callout computed from the stats (`1V4?!`, `ACE?!`, `1V3?!`, `4K CLUTCH`; override the first with `--thumb-text`).
+They lead with the most striking feat (1v5 > 1v4 > ace > 1v3 > 4K), not the highlight score, and each shows a
+different callout while there are different ones, so the three suit YouTube's thumbnail test (Test & Compare).
+The model's thumbnail picks, when there are any, come first. The callout is never the model's.
+
+The callout is rendered as extruded, bevelled 3D text in Blender (`src/cotw/blender_text.py`: Space Grotesk
+Bold, a white face and cyan sides, about 3 s for all three) and laid on with a drop shadow and accent
+glow. Blender is found via `--blender`, `$BLENDER`, `PATH` or `/Applications/Blender.app`; without it, or with
+`--flat-thumbnails`, the flat text is used. The shading behind the callout and the branding corner gets darker
+on bright frames. `--thumbnails-only` writes the thumbnails (and `--description`) without rendering the video.
 
 ### Match data (FACEIT)
 

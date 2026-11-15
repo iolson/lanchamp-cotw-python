@@ -4,7 +4,8 @@ thumbnails and the YouTube description with chapters and credits."""
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, replace
+import re
+from dataclasses import dataclass, field, replace
 
 from cotw.plan import ClipPlan, Timeline, relayout
 
@@ -107,8 +108,12 @@ def cold_open_window(clip: ClipPlan, max_len: float = 9.0, min_len: float = 6.0)
 def callout(clip: ClipPlan) -> str:
     """Short thumbnail text for a clip: the feat, as a question or exclamation."""
     desc = clip.detail.lower()
-    if clip.won_clutch >= 2:
+    if clip.won_clutch >= 3:
         return f"1V{clip.won_clutch}?!"
+    if clip.won_clutch == 2 and clip.kills_n >= 4:  # "1V2" undersells a 4K that ends in a clutch
+        return f"{_kills(clip.kills_n)} CLUTCH"
+    if clip.won_clutch == 2:
+        return "1V2?!"
     if clip.kills_n >= 5:
         return "ACE?!"
     for flag, text in (("knife", "KNIFE?!"), ("zeus", "ZEUS?!"), ("noscope", "NOSCOPE?!")):
@@ -117,6 +122,150 @@ def callout(clip: ClipPlan) -> str:
     if clip.kills_n >= 3:
         return f"{clip.kills_n}K?!"
     return "HOW?!"
+
+
+def _kills(n: int) -> str:
+    return "ACE" if n >= 5 else f"{n}K"
+
+
+def feat_rank(c: ClipPlan) -> tuple[float, int, float]:
+    """How striking a clip's feat is on a thumbnail or in a title (not its highlight score): a 1v5 beats
+    a 1v4, which beats an ace, then 1v3s, 4Ks, 4K-into-1v2s and the rest; kills, then score break ties."""
+    if c.won_clutch >= 5:
+        f = 6.0
+    elif c.won_clutch == 4:
+        f = 5.0
+    elif c.kills_n >= 5:
+        f = 4.5
+    elif c.won_clutch == 3:
+        f = 4.0
+    elif c.kills_n >= 4:
+        f = 3.0 + (0.5 if c.won_clutch else 0.0)
+    else:
+        f = c.kills_n / 2 + c.won_clutch / 4
+    return f, c.kills_n, c.score
+
+
+def thumbnail_picks(clips: list[ClipPlan], count: int, preferred: list[int] | None = None) -> list[ClipPlan]:
+    """The clips for the thumbnails: `preferred` (e.g. the model's picks) first, then the most striking
+    feats, one per callout while there are different ones, so the variants suit a 3-way thumbnail test."""
+    pool = [c for c in clips if not c.broll]
+    by_number = {c.number: c for c in pool}
+    ranked = sorted(pool, key=feat_rank, reverse=True)
+    out = [by_number[n] for n in preferred or [] if n in by_number][:count]
+    for c in ranked:
+        if len(out) >= count:
+            break
+        if c not in out and callout(c) not in {callout(o) for o in out}:
+            out.append(c)
+    out += [c for c in ranked if c not in out]
+    return out[:count]
+
+
+_NUMBER_WORDS = {2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six", 7: "Seven", 8: "Eight", 9: "Nine"}
+
+
+@dataclass(frozen=True)
+class Facts:
+    """What an episode can honestly claim, for titles (and for the model writing them)."""
+
+    clips: int
+    aces: int
+    clutches: dict[int, int] = field(default_factory=dict)  # won 1vN clutch size -> how many
+    quads: int = 0  # 4Ks that are not part of an ace
+    ace_divisions: tuple[str, ...] = ()  # e.g. ("ESEA Open",) for each ace, league range dropped
+
+    @property
+    def biggest_clutch(self) -> int:
+        return max(self.clutches, default=0)
+
+    def as_dict(self) -> dict:
+        return {"clips": self.clips, "aces": self.aces, "quad_kills": self.quads,
+                "won_clutches": {f"1v{n}": k for n, k in sorted(self.clutches.items(), reverse=True)},
+                "ace_divisions": list(self.ace_divisions)}
+
+
+def _division(c: ClipPlan, league: str) -> str:
+    d = re.sub(r"\s*\d+\s*-\s*\d+$", "", c.division or "").strip()  # "ESEA Open 1-8" -> "ESEA Open"
+    if d and league and not d.lower().startswith(league.lower()):
+        d = f"{league} {d}"
+    return d
+
+
+def episode_facts(timeline: Timeline, league: str = "") -> Facts:
+    clips = [c for c in timeline.clips if not c.broll]
+    clutches: dict[int, int] = {}
+    for c in clips:
+        if c.won_clutch >= 2:
+            clutches[c.won_clutch] = clutches.get(c.won_clutch, 0) + 1
+    aces = [c for c in clips if c.kills_n >= 5]
+    return Facts(len(clips), len(aces), clutches, sum(c.kills_n == 4 for c in clips),
+                 tuple(d for d in (_division(c, league) for c in aces) if d))
+
+
+def _count(n: int, noun: str) -> str:
+    """'an Ace', 'Three Aces', 'a 1v4 Clutch', 'Two 1v4 Clutches'."""
+    if n == 1:
+        return ("an " if noun[0] in "AEIOU" else "a ") + noun
+    plural = noun + ("es" if noun.endswith(("ch", "s")) else "s")
+    return f"{_NUMBER_WORDS.get(n, str(n))} {plural}"
+
+
+def title_options(timeline: Timeline, info: "DescriptionInfo", limit: int = 70) -> list[str]:
+    """Hook-first titles built only from the episode's stats, strongest first; the series name goes last so
+    the hook survives truncation. They name what the episode holds without repeating one thumbnail's callout."""
+    f = episode_facts(timeline, info.league)
+    tag = f"EP.{info.episode:02d}"
+    suffixes = (f" | CS2 Clips of the Week {tag}", f" | LANChamp {tag}", "")
+    hooks: list[str] = []
+    big = f.biggest_clutch
+    if f.aces or big >= 3:
+        parts = []
+        if f.aces:
+            parts.append(_count(f.aces, "Ace"))
+        if big >= 3:
+            parts.append(_count(f.clutches[big], f"1v{big} Clutch"))
+        hooks.append(" & ".join(parts) + " in One Week")
+    if big >= 3:
+        hooks.append(f"Down 1v{big}. Then This Happened.")
+    if f.aces and f.ace_divisions:
+        div = max(set(f.ace_divisions), key=f.ace_divisions.count)
+        n = f.ace_divisions.count(div)
+        hooks.append(f"{_count(n, 'Ace')} From {div} Players This Week")
+    if sum(f.clutches.values()) >= 3:
+        hooks.append(f"{sum(f.clutches.values())} Clutches, {f.clips} Plays, One Week")
+    if info.top_n:
+        hooks.append(f"Top {info.top_n} {info.league + ' ' if info.league else ''}CS2 Plays of the Week")
+    hooks.append(f"The Best {info.league + ' ' if info.league else ''}Plays This Week")
+    out = []
+    for h in hooks:
+        h = h[0].upper() + h[1:]
+        title = next((h + sfx for sfx in suffixes if len(h + sfx) <= limit), h[:limit])
+        if title not in out:
+            out.append(title)
+    return out
+
+
+def title_is_honest(title: str, facts: Facts) -> bool:
+    """False when a title gets a number wrong: a clutch size the episode does not have, or an ace or clutch
+    count that is not the real one (fewer is wrong too: "2 aces" in a three-ace week)."""
+    t = title.lower()
+    for n in re.findall(r"1\s*v\s*(\d)", t):
+        if int(n) not in facts.clutches:
+            return False
+    words = {w.lower(): k for k, w in _NUMBER_WORDS.items()} | {"an": 1, "a": 1, "one": 1}
+    for num, _ in re.findall(r"\b(\d+|an?|one|two|three|four|five|six|seven|eight|nine)\s+aces?\b()", t):
+        if (int(num) if num.isdigit() else words[num]) != facts.aces:
+            return False
+    for num, size in re.findall(r"\b(\d+|an?|one|two|three|four|five|six|seven|eight|nine)\s+1\s*v\s*(\d)\s+clutch", t):
+        if (int(num) if num.isdigit() else words[num]) != facts.clutches.get(int(size), 0):
+            return False
+    for num in re.findall(r"\b(\d+|two|three|four|five|six|seven|eight|nine)\s+(?:won\s+)?clutch(?:es)?\b(?!\s+won)", t):
+        if (int(num) if num.isdigit() else words[num]) != sum(facts.clutches.values()):
+            return False
+    if "ace" in re.findall(r"\bace\b", t) and not facts.aces:
+        return False
+    return True
 
 
 def stamp(seconds: float) -> str:
@@ -142,12 +291,25 @@ class DescriptionInfo:
 
 
 def title_suggestion(timeline: Timeline, info: DescriptionInfo) -> str:
-    """Complements the thumbnail instead of repeating its callout: the thumbnail carries the feat, the
-    title names the series and where it is from."""
-    where = f"{info.league} " if info.league else ""
-    if info.top_n:
-        return f"Top {info.top_n} {where}CS2 Plays of the Week | LANChamp Clips of the Week EP.{info.episode:02d}"
-    return f"The Best {where}CS2 Plays of the Week | LANChamp Clips of the Week EP.{info.episode:02d}"
+    """The strongest of `title_options`."""
+    return title_options(timeline, info)[0]
+
+
+def intro_line(timeline: Timeline, info: DescriptionInfo) -> str:
+    """The description's first line (shown under the title in search): the episode's biggest numbers first."""
+    f = episode_facts(timeline, info.league)
+    bits = []
+    if f.aces:
+        bits.append(_count(f.aces, "Ace").lower())
+    for n in sorted(f.clutches, reverse=True)[:2]:
+        if n >= 3:
+            bits.append(_count(f.clutches[n], f"1v{n} Clutch").lower())
+    league = f"{info.league} " if info.league else ""
+    head = (", ".join(bits[:-1]) + " and " + bits[-1] if len(bits) > 1 else bits[0]) if bits else ""
+    lead = f"{head[0].upper() + head[1:]}: " if head else ""
+    when = f"{league}matches in the week of {info.week}" if info.week else f"this week's {league}matches"
+    return (f"{lead}the {f.clips} best plays from {when}. "
+            f"Clips of the Week EP.{info.episode:02d}, every player credited below.")
 
 
 def description(timeline: Timeline, info: DescriptionInfo, *, lead: float, cold: float = 0.0,
@@ -161,9 +323,8 @@ def description(timeline: Timeline, info: DescriptionInfo, *, lead: float, cold:
     """
     clips = [c for c in timeline.clips if not c.broll]
     league = f"{info.league} " if info.league else ""
-    lines = ["TITLE OPTIONS", *(titles or [title_suggestion(timeline, info)]), ""]
-    intro = f"Clips of the Week EP.{info.episode:02d}" + (f" · week of {info.week}" if info.week else "")
-    lines += [intro_text or f"{intro}: the best plays from this week's {league}matches, picked from {len(clips)} clips.", ""]
+    lines = ["TITLE OPTIONS", *(titles or title_options(timeline, info)), ""]
+    lines += [intro_text or intro_line(timeline, info), ""]
     if info.submit_url:
         lines += [f"Got a clip? Submit it: {info.submit_url}", ""]
 

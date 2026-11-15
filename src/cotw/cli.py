@@ -29,7 +29,7 @@ from cotw import thumbnail as thumb
 from cotw.ai import AiError, load_plan, suggest_copy, suggest_music, suggest_plan
 from cotw.beats import BeatError, analyze_track, detect_beats
 from cotw.plan import (
-    ORDERS, _map_slug, SLOWMO_MODES, add_broll, apply_slowmo, arrange, parse_numbers, relayout, sections, snap_cuts_multi,
+    ORDERS, _map_slug, SLOWMO_MODES, add_broll, apply_fastforward, apply_slowmo, arrange, parse_numbers, relayout, sections, snap_cuts_multi,
     song_switches,
 )
 
@@ -52,7 +52,10 @@ def render_assets(
     assets = Assets()
     save = lambda img, name: _save(img, work / name)  # noqa: E731
 
-    if title:
+    if title and opts.intro:
+        assets.title = save(graphics.intro_backdrop(), "title.png")
+        assets.intro_meta = save(graphics.intro_meta(meta), "intro_meta.png")
+    elif title:
         assets.title = save(graphics.title_card(meta, title_style), "title.png")
     if end:
         assets.end = save(graphics.end_card(meta), "end.png")
@@ -162,14 +165,37 @@ def _load_broll(ffmpeg: Path, folder: Path, mains: list) -> dict[str, list[tuple
     return footage
 
 
+INTRO_OVERLAP = 1.0  # the intro over the cold open starts this long before the teaser would have ended
+
+
+def _intro_meta_times(intro: Path, length: float) -> tuple[float, float]:
+    """When the episode line shows over the intro: from the Blender render's `<name>_events.json` (after the
+    divider lands, until the fade-out), else from 65% of the intro to 1.3 s before its end."""
+    on, off = length * 0.65, length - 1.3
+    try:
+        events = json.loads(intro.with_name(f"{intro.stem}_events.json").read_text(encoding="utf-8"))["events"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return on, max(on, off)
+    ends = {e.get("type"): e.get("end_time") or e.get("time") for e in events}
+    starts = {e.get("type"): e.get("time") for e in events}
+    on = float(ends.get("divider_dots") or ends.get("subtitle_in") or on)
+    off = float(starts.get("fade_out") or off)
+    return min(on, length), min(max(on, off), length)
+
+
 def _write_thumbnails(ffmpeg: Path, mains: list, timeline: Timeline, meta: graphics.EpisodeMeta, path: Path,
-                      count: int, text: str | None, preferred: list[int]) -> None:
-    """Hero thumbnails from the best clips: `path` for the first, `<stem>-2`, `<stem>-3` ... for the others."""
-    by_number = {c.number: c for c in timeline.clips if not c.broll}
-    ranked = sorted(by_number.values(), key=lambda c: -c.score)
-    picks = [by_number[n] for n in preferred if n in by_number]
-    picks += [c for c in ranked if c not in picks]
-    for i, clip in enumerate(picks[:count]):
+                      count: int, text: str | None, preferred: list[int], blender: Path | None = None) -> None:
+    """Hero thumbnails from the best clips: `path` for the first, `<stem>-2`, `<stem>-3` ... for the others.
+    With `blender`, the callouts are 3D text rendered there instead of flat text."""
+    picks = ep.thumbnail_picks(timeline.clips, count, preferred)
+    labels = [text if (text and i == 0) else ep.callout(clip) for i, clip in enumerate(picks)]
+    callouts: list = [None] * len(picks)
+    if blender:
+        try:
+            callouts = thumb.render_callouts(blender, [(t, thumb.accent_for(meta.episode)) for t in labels])
+        except (FfmpegError, OSError) as exc:
+            click.echo(f"warning: 3D thumbnail text failed, using flat text: {exc}", err=True)
+    for i, clip in enumerate(picks):
         ks = sorted(t for t, _, _ in clip.kills)
         at = clip.src_start + (ks[-1] if ks else (clip.src_len or clip.duration) / 2) - 0.05
         out = path if i == 0 else path.with_name(f"{path.stem}-{i + 1}{path.suffix}")
@@ -178,9 +204,9 @@ def _write_thumbnails(ffmpeg: Path, mains: list, timeline: Timeline, meta: graph
         except FfmpegError as exc:
             click.echo(f"warning: thumbnail for clip #{clip.number} skipped: {exc}", err=True)
             continue
-        label = text if (text and i == 0) else ep.callout(clip)
-        thumb.save(thumb.render(frame, meta, label, clip.player, clip.team), out)
-        click.echo(f"Thumbnail {out}: clip #{clip.number} {clip.player} \"{label}\"")
+        label = labels[i]
+        thumb.save(thumb.render(frame, meta, label, clip.player, clip.team, callout=callouts[i]), out)
+        click.echo(f"Thumbnail {out}: clip #{clip.number} {clip.player} \"{label}\"{' (3D)' if callouts[i] else ''}")
 
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
@@ -200,6 +226,16 @@ def _write_thumbnails(ffmpeg: Path, mains: list, timeline: Timeline, meta: graph
               help="JSON of per-player name/team overrides (default: ./names.json if present).")
 @click.option("--title-style", type=click.Choice(["center", "cinematic"]), default="center", show_default=True)
 @click.option("--title-seconds", type=float, default=5.0, show_default=True)
+@click.option("--intro", "intro_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Intro video with alpha (e.g. the Blender LANChamp reveal, ProRes 4444) played over the title card's "
+                   "background instead of its text, with the episode line faded in after the logo lands. Sets "
+                   "--title-seconds to its length unless given.")
+@click.option("--intro-over", type=click.Choice(["cold", "card"]), default="cold", show_default=True,
+              help="cold: the --intro plays over the cold open's footage, starting just after its last kill, with the "
+                   "footage dimmed and running on underneath, straight into the first clip. card: over the title "
+                   "card's background, after the cold open. Without a cold open it is always the card.")
+@click.option("--preview-intro", is_flag=True,
+              help="Render only the cold open, the intro and the first clip (to check the intro without the episode).")
 @click.option("--lower-third-seconds", type=float, default=Options.lower_third_seconds, show_default=True,
               help="How long each lower third stays up (including its fades).")
 @click.option("--lower-third-scale", type=float, default=0.65, show_default=True,
@@ -222,6 +258,9 @@ def _write_thumbnails(ffmpeg: Path, mains: list, timeline: Timeline, meta: graph
                    "all, or clip numbers like 3,5.")
 @click.option("--slowmo-speed", type=click.FloatRange(0.5, 0.95), default=0.5, show_default=True,
               help="Playback speed inside slow motion (0.5 is smooth from a 120 fps source at 60 fps output).")
+@click.option("--lull-speed", type=click.FloatRange(1.0, 8.0), default=4.0, show_default=True,
+              help="Fast-forward the lulls between kills (e.g. a 1v3 walking between fights) at this speed, with eased "
+                   "ramps, so the whole play stays in; 1 turns it off. Needs the kill positions of --kill-padding reports.")
 @click.option("--transitions", type=click.Choice(["none", "random", *fx.KINDS]), default="none", show_default=True,
               help="Cut effects on the joins between clips: film burn, TV no-signal, RGB glitch, sepia old film, "
                    "grunge, pixelate and anamorphic flare; random picks a seeded look per cut.")
@@ -265,7 +304,15 @@ def _write_thumbnails(ffmpeg: Path, mains: list, timeline: Timeline, meta: graph
 @click.option("--thumbnail", "thumbnail_path", type=click.Path(dir_okay=False, path_type=Path),
               help="Write a thumbnail JPEG from the best clip (and <name>-2, <name>-3 from the next).")
 @click.option("--thumbnail-count", type=click.IntRange(1, 6), default=3, show_default=True)
+@click.option("--flat-thumbnails", is_flag=True, help="Flat callout text on thumbnails instead of 3D text from Blender.")
+@click.option("--blender", "blender_path", type=click.Path(dir_okay=False, path_type=Path),
+              help="Blender for 3D thumbnail text (default: $BLENDER, PATH, then /Applications/Blender.app).")
+@click.option("--thumbnails-only", is_flag=True, help="Write the --thumbnail images (and --description) and stop.")
 @click.option("--thumb-text", help="Callout text for the first thumbnail instead of the computed one, e.g. 'HE WON THIS?!'.")
+@click.option("--copy-ai", "copy_ai_url", metavar="URL",
+              help="LLM for titles, description intro and thumbnail picks only, without --ai's edit decisions "
+                   "(order, slow motion, music). Its titles are added after the stat-based ones and dropped if "
+                   "they claim a feat the episode does not have.")
 @click.option("--no-ai-copy", is_flag=True, help="With --ai, do not ask the model for titles, intro and thumbnail picks.")
 @click.option("--no-title", is_flag=True, help="Skip the title card.")
 @click.option("--no-bug", is_flag=True, help="Skip the corner bug.")
@@ -282,11 +329,12 @@ def _write_thumbnails(ffmpeg: Path, mains: list, timeline: Timeline, meta: graph
               help="Render the graphics into this folder and stop (visual check).")
 @click.option("--dry-run", is_flag=True, help="Print the timeline and FFmpeg command without encoding.")
 def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None, episode: int, week: str, featuring: str,
-         league: str, channel: str, next_up: str, team: str, names_path: Path | None, title_style: str, title_seconds: float,
+         league: str, channel: str, next_up: str, team: str, names_path: Path | None, title_style: str, title_seconds: float, intro_path: Path | None, intro_over: str, preview_intro: bool,
          ai_url: str | None, ai_model: str | None, ai_fast: bool, plan_path: Path | None,
          structure: str, top_n: int | None, cold_open_seconds: float, submit_url: str, description_path: Path | None,
-         thumbnail_path: Path | None, thumbnail_count: int, thumb_text: str | None, no_ai_copy: bool,
-         kill_padding: float | None, slowmo: str, slowmo_clips: str, slowmo_speed: float, transitions: str, snap_cuts_on: bool, music_files: tuple[Path, ...], music_dir: Path | None, sections_by: str, broll_dir: Path | None,
+         thumbnail_path: Path | None, thumbnail_count: int, flat_thumbnails: bool,
+         blender_path: Path | None, thumbnails_only: bool, thumb_text: str | None, copy_ai_url: str | None, no_ai_copy: bool,
+         kill_padding: float | None, slowmo: str, slowmo_clips: str, slowmo_speed: float, lull_speed: float, transitions: str, snap_cuts_on: bool, music_files: tuple[Path, ...], music_dir: Path | None, sections_by: str, broll_dir: Path | None,
          broll_seconds: float, music_volume: float, music_start: float | None,
          order: str, reverse: bool, seed: int | None, pick: str | None, skip: str | None,
          end_seconds: float, lower_third_seconds: float, lower_third_scale: float, end_mode: str, no_title: bool, no_bug: bool, no_lower_thirds: bool, no_punch: bool,
@@ -345,6 +393,10 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
             mains.append((v, info))
             timelines.append(tl)
         timeline = merge_timelines(timelines)
+        timeline = apply_fastforward(timeline, lull_speed)
+        if any(c.fast for c in timeline.clips):
+            click.echo(f"Fast-forward x{lull_speed:g} through lulls on clip(s): "
+                       + ", ".join(f"#{c.number}" for c in timeline.clips if c.fast))
         if ai_url or (plan_path and plan_path.is_file()):
             ctx = click.get_current_context()
             plan = _edit_plan(timeline, ai_url, ai_model, plan_path, think=not ai_fast)
@@ -387,6 +439,24 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
                 click.echo(f"Cold open: {ln:.1f}s from clip #{best.number} ({best.player} · {best.stat})")
             if ctx_source(click.get_current_context(), "title_seconds"):
                 title_seconds = 4.0  # a fast intro
+        intro_meta_at = (0.0, 0.0)
+        if intro_path:
+            if ctx_source(click.get_current_context(), "title_seconds"):
+                title_seconds = probe(ffmpeg, intro_path).duration
+            intro_meta_at = _intro_meta_times(intro_path, title_seconds)
+            click.echo(f"Intro: {intro_path.name} ({title_seconds:.1f}s), episode line at "
+                       f"{intro_meta_at[0]:.1f}-{intro_meta_at[1]:.1f}s")
+        intro_at: float | None = None  # where the intro starts inside the cold open when it plays over it
+        if intro_path and cold_open and intro_over == "cold" and not no_title:
+            src, st, ln = cold_open
+            intro_at = max(0.0, ln - INTRO_OVERLAP)
+            cold_open = (src, st, intro_at + title_seconds)
+            title_seconds = 0.0  # no separate card: the cold open carries the intro
+            click.echo(f"Intro over the cold open from {intro_at:.1f}s ({cold_open[2]:.1f}s in all)")
+        if preview_intro:
+            timeline = relayout(timeline.clips[:1])
+            end_mode, description_path, thumbnail_path = "off", None, None
+            click.echo("Preview: cold open, intro and the first clip only")
         if broll_dir and sections_by != "map":
             raise click.UsageError("--broll needs --sections map")
         if sections_by == "map":
@@ -408,7 +478,7 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
             timeline = apply_slowmo(timeline, slowmo, slowmo_speed, sel)
             click.echo("Slow motion on clip(s): " + (", ".join(f"#{c.number}" for c in timeline.clips if c.slow) or "none"))
         song_len = [audio_duration(ffmpeg, p) for p in songs]
-        first = (cold or title) if music_start is None else music_start  # music starts on the intro, or after the title
+        first = (intro_at if intro_at is not None else cold or title) if music_start is None else music_start  # music starts on the intro, or after the title
         switches = song_switches(timeline, song_len, offset=lead, start=first) if len(songs) > 1 else []
         if len(songs) > 1:
             if len(switches) + 1 < len(songs):
@@ -433,7 +503,8 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
     for c in timeline.clips:
         punch = f"  punch {c.punch.value}" if c.punch else ""
         slow = f"  slow-mo x{len(c.slow)}" if c.slow else ""
-        click.echo(f"  #{c.number:<2} {c.start:7.1f}s +{c.duration:5.1f}s  {c.player} · {c.stat}{punch}{slow}")
+        fast = f"  fast x{len(c.fast)}" if c.fast else ""
+        click.echo(f"  #{c.number:<2} {c.start:7.1f}s +{c.duration:5.1f}s  {c.player} · {c.stat}{punch}{slow}{fast}")
 
     # Cut effects on the final timeline; a window must not reach before 0, so early cuts stay clean.
     planned = fx.plan_transitions([c.start for c in timeline.clips[1:] if c.start >= 0.35],
@@ -449,29 +520,43 @@ def main(videos: tuple[Path, ...], report_path: Path | None, output: Path | None
                    music_start=music_start if len(songs) <= 1 else None,
                    music_duration=song_len[0] if len(songs) == 1 else None,
                    tracks=tuple(zip(songs, song_starts, song_len)) if len(songs) > 1 else (),
-                   transitions=tuple(planned), cold=cold_open)
+                   transitions=tuple(planned), cold=cold_open, intro=intro_path, intro_meta_at=intro_meta_at,
+                   intro_at=intro_at)
 
     if description_path or thumbnail_path:
         copy = None
-        if ai_url and not no_ai_copy:
+        if (copy_ai_url or ai_url) and not no_ai_copy:
             try:
-                copy = suggest_copy(timeline, episode, league, ai_url, ai_model)
+                copy = suggest_copy(timeline, episode, league, copy_ai_url or ai_url, ai_model)
                 click.echo("AI copy: " + " | ".join(copy.titles))
             except AiError as exc:
-                click.echo(f"warning: no AI copy ({exc}); using the plain template", err=True)
+                click.echo(f"warning: no AI copy ({exc}); using the stat-based titles", err=True)
         if description_path:
             outro_at = None if end_mode == "off" else (
                 lead + timeline.duration if end_mode == "append" else lead + max(0.0, timeline.duration - end_seconds))
             info = ep.DescriptionInfo(episode, week, league, channel, submit_url, next_up,
                                       top_n=len(timeline.clips) if structure == "countdown" else 0)
-            text = ep.description(timeline, info, lead=lead, cold=cold, labels=labels, outro_at=outro_at,
-                                  titles=copy.titles if copy else None, intro_text=copy.intro if copy else None)
+            facts = ep.episode_facts(timeline, league)
+            titles = ep.title_options(timeline, info)
+            extra = []
+            for t in copy.titles if copy else []:
+                if not ep.title_is_honest(t, facts):
+                    click.echo(f"note: dropped AI title that gets a number wrong: {t}", err=True)
+                elif t not in titles:
+                    extra.append(t)
+            titles += extra[:3]
+            click.echo("Titles:\n  " + "\n  ".join(titles))
+            text = ep.description(timeline, info, lead=lead, cold=cold if intro_at is None else intro_at, labels=labels, outro_at=outro_at,
+                                  titles=titles)  # the stat-led intro line beats the model's
             description_path.parent.mkdir(parents=True, exist_ok=True)
             description_path.write_text(text, encoding="utf-8")
             click.echo(f"Description: {description_path}")
         if thumbnail_path:
             _write_thumbnails(ffmpeg, mains, timeline, meta, thumbnail_path, thumbnail_count, thumb_text,
-                              copy.thumbnail_clips if copy else [])
+                              copy.thumbnail_clips if copy else [],
+                              None if flat_thumbnails else thumb.find_blender(blender_path))
+        if thumbnails_only:
+            return
 
     keep = graphics_only is not None
     work = graphics_only or Path(tempfile.mkdtemp(prefix="cotw-"))

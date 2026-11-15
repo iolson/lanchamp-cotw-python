@@ -21,6 +21,28 @@ PUNCH_FADE_OUT = 0.25
 # Slow-motion sound: slowed like a tape (pitch drops with speed, so nothing is stretched or smeared the
 # way atempo does to gunfire), then low-passed for the muffled movie-slow-mo feel.
 SLOW_AUDIO = ",asetrate=48000*{speed},aresample=48000,lowpass=f=3200"
+
+
+def _retime_expr(segs: list[tuple[float, float, float]]) -> str:
+    """setpts expression (seconds) playing source pieces (offset, length, speed) back to back at their speeds."""
+    out, at = [], 0.0
+    for off, length, speed in segs:
+        out.append((off + length, f"{at:.6f}+(ld(0)-{off:.6f})/{speed:.6f}"))
+        at += length / speed
+    expr = out[-1][1]
+    for end, piece in reversed(out[:-1]):
+        expr = f"if(lt(ld(0),{end:.6f}),{piece},{expr})"
+    return f"st(0,(PTS-STARTPTS)*TB);{expr}"
+
+
+def _fast_audio(speed: float) -> str:
+    """Fast-forward sound: tempo-stretched (atempo takes at most 2x per stage) and a little quieter."""
+    stages, left = [], speed
+    while left > 2.0 + 1e-6:
+        stages.append("atempo=2")
+        left /= 2.0
+    stages.append(f"atempo={_num(left)}")
+    return "," + ",".join(stages) + ",volume=0.6"
 CUT_FADE = 0.03  # audio fade at the edges of a trimmed clip
 
 
@@ -41,6 +63,7 @@ class MediaInfo:
 class Assets:
     bug: Path | None = None
     title: Path | None = None
+    intro_meta: Path | None = None  # episode line over an intro video (with Options.intro)
     end: Path | None = None
     lower_thirds: dict[int, Path] = field(default_factory=dict)  # clip number -> PNG
     punches: dict[int, Path] = field(default_factory=dict)  # clip number -> dir of %03d.png frames
@@ -70,6 +93,9 @@ class Options:
     music_fade_out: float = 3.0
     transitions: tuple[tuple[float, str], ...] = ()  # (cut time on the video clock, kind) from transitions.py
     cold: tuple[int, float, float] | None = None  # cold open before the title card: (source index, source start, seconds)
+    intro: Path | None = None  # video with alpha played over the title card's background instead of its text
+    intro_meta_at: tuple[float, float] = (0.0, 0.0)  # when the episode line fades in and out over the intro
+    intro_at: float | None = None  # set: the intro plays over the cold open from this many seconds in
 
     @property
     def cold_seconds(self) -> float:
@@ -233,30 +259,36 @@ def build_args(
     def silence(seconds: float) -> int:
         return g.add_input("-f", "lavfi", "-t", _num(seconds), "-i", "anullsrc=r=48000:cl=stereo")
 
-    # Each clip is cut from its source video (in timeline order, slow-motion pieces at their own
-    # speed), normalised, then everything is joined.
+    # Each clip is read once from its source video: the video is retimed by one piecewise setpts
+    # (slow motion, fast-forward and the ramps between them), the audio is split into those pieces inside
+    # the graph, each at its own speed. Then everything is joined. (One input per speed piece ran ffmpeg
+    # out of threads once fast-forward ramps pushed an episode past 400 inputs.)
     pieces: list[str] = []
     for k, clip in enumerate(timeline.clips):
         path, mi = mains[clip.source]
         segs = clip_segments(clip)
-        for j, (off, length, speed) in enumerate(segs):
-            tag = f"{k}_{j}"
-            idx = g.add_input("-ss", _num(clip.src_start + off), "-t", _num(length), "-i", str(path))
-            slow = abs(speed - 1.0) > 1e-6
-            retime = f"setpts=(PTS-STARTPTS)/{_num(speed)}," if slow else ""
-            g.chain(f"[{idx}:v]{retime}fps={fps},scale={size},setsar=1[mv{tag}]")
-            shown = length / speed
-            if mi.has_audio:
-                audio = f"[{idx}:a:0]aresample=48000,aformat=channel_layouts=stereo" + (SLOW_AUDIO.format(speed=_num(speed)) if slow else "")
-            else:
-                audio = f"[{silence(shown)}:a]anull"
-            fades = []
-            if clip.trimmed and j == 0:  # tiny fades so the cuts don't click
-                fades.append(f"afade=t=in:d={CUT_FADE}")
-            if clip.trimmed and j == len(segs) - 1:
-                fades.append(f"afade=t=out:st={_num(max(0.0, shown - CUT_FADE))}:d={CUT_FADE}")
-            g.chain(audio + "".join("," + f for f in fades) + f"[ma{tag}]")
-            pieces.append(f"[mv{tag}][ma{tag}]")
+        src_len = sum(length for _, length, _ in segs)
+        shown = sum(length / speed for _, length, speed in segs)
+        idx = g.add_input("-ss", _num(clip.src_start), "-t", _num(src_len), "-i", str(path))
+        retime = f"setpts='{_retime_expr(segs)}/TB'," if len(segs) > 1 or abs(segs[0][2] - 1.0) > 1e-6 else ""
+        g.chain(f"[{idx}:v]{retime}fps={fps},scale={size},setsar=1[mv{k}]")
+        if mi.has_audio:
+            g.chain(f"[{idx}:a:0]aresample=48000,aformat=channel_layouts=stereo,asplit={len(segs)}"
+                    + "".join(f"[as{k}_{j}]" for j in range(len(segs))))
+            for j, (off, length, speed) in enumerate(segs):
+                slow = abs(speed - 1.0) > 1e-6
+                fx = ((SLOW_AUDIO.format(speed=_num(speed)) if speed < 1 else _fast_audio(speed)) if slow else "")
+                g.chain(f"[as{k}_{j}]atrim=start={_num(off)}:end={_num(off + length)},asetpts=PTS-STARTPTS{fx}"
+                        f"[ap{k}_{j}]")
+            audio = ("".join(f"[ap{k}_{j}]" for j in range(len(segs)))
+                     + f"concat=n={len(segs)}:v=0:a=1" if len(segs) > 1 else f"[ap{k}_0]anull")
+        else:
+            audio = f"[{silence(shown)}:a]anull"
+        fades = []
+        if clip.trimmed:  # tiny fades so the cuts don't click
+            fades += [f"afade=t=in:d={CUT_FADE}", f"afade=t=out:st={_num(max(0.0, shown - CUT_FADE))}:d={CUT_FADE}"]
+        g.chain(audio + "".join("," + f for f in fades) + f"[ma{k}]")
+        pieces.append(f"[mv{k}][ma{k}]")
     g.chain(f"{''.join(pieces)}concat=n={len(pieces)}:v=1:a=1[v0][amain]")
     cur, step = "v0", 0
     if opts.transitions:  # cut effects under the graphics; vtr labels cannot clash with v{n}
@@ -323,18 +355,57 @@ def build_args(
         src, st, d = opts.cold
         path, mi = mains[src]
         idx = g.add_input("-ss", _num(st), "-t", _num(d), "-i", str(path))
-        g.chain(
-            f"[{idx}:v]fps={fps},scale={size},setsar=1,format=yuv420p,"
-            f"fade=t=in:st=0:d=0.15,fade=t=out:st={_num(d - 0.2)}:d=0.2[vcold]"
-        )
         audio = f"[{idx}:a:0]aresample=48000,aformat=channel_layouts=stereo" if mi.has_audio else f"[{silence(d)}:a]anull"
-        g.chain(f"{audio},afade=t=in:d=0.15,afade=t=out:st={_num(d - 0.2)}:d=0.2[acold]")
+        if opts.intro and opts.intro_at is not None:
+            # footage keeps running (last frame held if the clip runs out), dims as the intro plays over it,
+            # and the game sound gives way to the music
+            at, out = opts.intro_at, 0.4
+            g.chain(f"[{idx}:v]fps={fps},scale={size},setsar=1,tpad=stop_mode=clone:stop_duration={_num(d)},"
+                    f"trim=duration={_num(d)},format=rgba,split[coldsharp][coldsoft]")
+            g.chain(f"[coldsoft]gblur=sigma=14,fade=t=in:st={_num(at)}:d=0.8:alpha=1[coldblur]")
+            g.chain("[coldsharp][coldblur]overlay=format=auto[coldbg]")
+            dim = g.add_input("-f", "lavfi", "-t", _num(d), "-i", f"color=c=black:s={info.width}x{info.height}:r={fps}")
+            g.chain(f"[{dim}:v]format=rgba,colorchannelmixer=aa=0.68,fade=t=in:st={_num(at)}:d=0.8:alpha=1[colddim]")
+            v = g.add_input("-t", _num(d - at), "-i", str(opts.intro))
+            g.chain(f"[{v}:v]fps={fps},scale={size},setsar=1,format=yuva420p,setpts=PTS-STARTPTS+{_num(at)}/TB[intro]")
+            g.chain("[coldbg][colddim]overlay=format=auto[cold1]")
+            g.chain("[cold1][intro]overlay=format=auto:eof_action=pass[cold2]")
+            cur_cold = "cold2"
+            if assets.intro_meta:
+                on, off = opts.intro_meta_at
+                m = loop_png(assets.intro_meta, d)
+                g.chain(f"[{m}:v]{rgba},fade=t=in:st={_num(at + on)}:d=0.6:alpha=1,"
+                        f"fade=t=out:st={_num(at + off)}:d=0.8:alpha=1[intrometa]")
+                g.chain("[cold2][intrometa]overlay=format=auto[cold3]")
+                cur_cold = "cold3"
+            g.chain(f"[{cur_cold}]format=yuv420p,fade=t=in:st=0:d=0.15,fade=t=out:st={_num(d - out)}:d={out}[vcold]")
+            g.chain(f"{audio},apad,atrim=end={_num(d)},afade=t=in:d=0.15,"
+                    f"afade=t=out:st={_num(at + 0.5)}:d=2.0[acold]")
+        else:
+            g.chain(
+                f"[{idx}:v]fps={fps},scale={size},setsar=1,format=yuv420p,"
+                f"fade=t=in:st=0:d=0.15,fade=t=out:st={_num(d - 0.2)}:d=0.2[vcold]"
+            )
+            g.chain(f"{audio},afade=t=in:d=0.15,afade=t=out:st={_num(d - 0.2)}:d=0.2[acold]")
         segments.append(("vcold", "acold"))
     if assets.title and opts.title_seconds > 0:
         d = opts.title_seconds
         i, a = loop_png(assets.title, d), silence(d)
+        card = f"[{i}:v]fps={fps},scale={size},setsar=1"
+        if opts.intro:  # the intro video (alpha) over the background, then the episode line
+            v = g.add_input("-t", _num(d), "-i", str(opts.intro))
+            g.chain(f"[{v}:v]fps={fps},scale={size},setsar=1,format=yuva420p[intro]")
+            g.chain(f"{card}[introbg]")
+            card = "[introbg][intro]overlay=format=auto:eof_action=pass"
+            if assets.intro_meta:
+                on, off = opts.intro_meta_at
+                m = loop_png(assets.intro_meta, d)
+                g.chain(f"[{m}:v]{rgba},fade=t=in:st={_num(on)}:d=0.6:alpha=1,"
+                        f"fade=t=out:st={_num(off)}:d=0.8:alpha=1[intrometa]")
+                g.chain(f"{card}[introv]")
+                card = "[introv][intrometa]overlay=format=auto"
         g.chain(
-            f"[{i}:v]fps={fps},scale={size},setsar=1,format=yuv420p,"
+            f"{card},format=yuv420p,"
             f"fade=t=in:st=0:d={FADE},fade=t=out:st={_num(d - FADE)}:d={FADE}[vtitle]"
         )
         g.chain(f"[{a}:a]anull[atitle]")
