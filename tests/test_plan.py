@@ -390,11 +390,44 @@ def test_clutch_start_is_kept_for_the_stat_punch():
 def test_match_point_clip_stops_before_the_victory_screen():
     r = _clutch_report()
     r["rounds"] = 10  # sequence round 10 is the last one: round_end is followed by "VICTORY"
-    r["sequences"][0]["events"].append({"type": "round_end", "seconds_from_clip_start": 49.9})
+    r["sequences"][0]["events"].append({"type": "round_end", "seconds_from_clip_start": 50.6})  # not on the kill
     c = build_timeline(r, kill_padding=2.5).clips[0]
-    assert abs(c.src_start + c.src_len - 49.82) < 1e-6 and c.trimmed  # cut just before round_end
-    assert abs(c.hold - 0.88) < 1e-6 and abs(c.duration - (c.src_len + c.hold)) < 1e-6  # the last kill freezes
+    assert abs(c.src_start + c.src_len - 50.52) < 1e-6 and c.trimmed  # cut just before round_end
+    assert c.ease_out == 0.6 and min(sp for _, _, sp in clip_segments(c)) < 0.4  # slows down instead of a hard cut
+    assert abs(c.duration - sum(l / sp for _, l, sp in clip_segments(c))) < 1e-6 and c.duration > c.src_len
     nopad = build_timeline(r).clips[0]
-    assert abs(nopad.src_len - 49.82) < 1e-6 and build_timeline(r).duration == nopad.duration
+    assert abs(nopad.src_len - 50.52) < 1e-6 and build_timeline(r).duration == nopad.duration
+    s = apply_slowmo(build_timeline(r, kill_padding=2.5), "last").clips[0]  # the last kill's slow-mo already ends it
+    assert s.ease_out == 0.6 and abs(s.duration - sum(l / sp for _, l, sp in clip_segments(s))) < 1e-6
     r["rounds"] = 11  # not the last round: untouched
-    assert build_timeline(r, kill_padding=2.5).clips[0].hold == 0.0
+    assert build_timeline(r, kill_padding=2.5).clips[0].ease_out == 0.0
+
+
+def test_match_winning_kill_keeps_a_moment_of_victory_and_fades():
+    r = _clutch_report()
+    r["rounds"] = 10
+    r["sequences"][0]["events"].append({"type": "round_end", "seconds_from_clip_start": 50.0})  # the 49.9 kill won it
+    c = build_timeline(r, kill_padding=2.5).clips[0]
+    assert abs(c.src_start + c.src_len - 52.0) < 1e-6 and c.trimmed  # two seconds of "VICTORY", not cut before it
+    assert c.ease_out == 0.0 and c.fade_out == 0.6
+    assert build_timeline(r).clips[0].fade_out == 0.6
+
+
+def test_cleared_clutch_ends_after_the_last_kill_not_the_defuse():
+    r = _clutch_report()  # 1v3, three kills by the player, clutch_end at the last kill
+    seq = r["sequences"][0]
+    seq["events"].insert(0, {"type": "clutch_start", "seconds_from_clip_start": 10.0, "steamid": "7"})
+    seq["events"][-1]["seconds_from_clip_start"] = 52.9  # a 3 s defuse after the last kill
+    c = build_timeline(r, kill_padding=2.5).clips[0]
+    assert abs(c.src_start + c.src_len - 52.4) < 1e-6  # last kill 49.9 + 2.5, not the defuse's end
+    seq["events"] = [e for e in seq["events"] if not (e["type"] == "kill" and e["seconds_from_clip_start"] == 42.9)]
+    c = build_timeline(r, kill_padding=2.5).clips[0]  # an opponent left: the defuse wins it, so it plays out
+    assert abs(c.src_start + c.src_len - 53.0) < 1e-6  # (to the end of the 53 s sequence)
+
+
+def test_match_point_clip_that_ends_early_has_no_ease():
+    r = _clutch_report()
+    r["rounds"] = 10
+    r["sequences"][0]["events"].append({"type": "round_end", "seconds_from_clip_start": 52.5})
+    c = build_timeline(r, kill_padding=2.5).clips[0]  # ends at the last kill + 2.5 = 52.4, before the cut at 52.42
+    assert c.ease_out == 0.0 and abs(c.src_start + c.src_len - 52.4) < 1e-6

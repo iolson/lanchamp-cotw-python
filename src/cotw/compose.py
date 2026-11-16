@@ -36,14 +36,41 @@ def _retime_expr(segs: list[tuple[float, float, float]]) -> str:
 
 
 def _fast_audio(speed: float) -> str:
-    """Fast-forward sound: tempo-stretched (atempo takes at most 2x per stage) and a little quieter."""
+    """Fast-forward sound: tempo-stretched (atempo takes at most 2x per stage); _fast_fades mutes it."""
     stages, left = [], speed
     while left > 2.0 + 1e-6:
         stages.append("atempo=2")
         left /= 2.0
     stages.append(f"atempo={_num(left)}")
-    return "," + ",".join(stages) + ",volume=0.6"
+    return "," + ",".join(stages)
+
+
+def _fast_fades(segs: list[tuple[float, float, float]]) -> str:
+    """volume expression (screen seconds) fading the game sound out while a fast-forward speeds up, silent at
+    full speed, and back in as it slows to normal. Empty when the clip has no fast-forward."""
+    runs: list[list[tuple[float, float, float]]] = []  # (screen start, screen end, speed) per fast piece
+    at, prev_fast = 0.0, False
+    for _, length, speed in segs:
+        fast = speed > 1.0 + 1e-6
+        if fast:
+            if not prev_fast:
+                runs.append([])
+            runs[-1].append((at, at + length / speed, speed))
+        prev_fast = fast
+        at += length / speed
+    terms = []
+    for run in runs:
+        top = max(sp for _, _, sp in run)
+        a, d = run[0][0], run[-1][1]
+        b = next(s for s, _, sp in run if sp >= top - 1e-6)  # silent from here...
+        c = next(e for _, e, sp in reversed(run) if sp >= top - 1e-6)  # ...to here
+        down, up = max(b - a, 0.05), max(d - c, 0.05)
+        terms.append(f"clip(max(({_num(a + down)}-t)/{_num(down)},(t-{_num(d - up)})/{_num(up)}),0,1)")
+    return "*".join(terms)
+
+
 CUT_FADE = 0.03  # audio fade at the edges of a trimmed clip
+EASE_FADE = 0.8  # audio fade-out over a clip that slows to a stop at the end
 
 
 class FfmpegError(RuntimeError):
@@ -274,8 +301,8 @@ def build_args(
         if clip.jumps:  # drop the cut stretches; the remaining frames keep their source times for the retime
             gone = "+".join(f"between(t,{_num(a)},{_num(b)})" for a, b in clip.jumps)
             retime = f"setpts=PTS-STARTPTS,select='not({gone})'," + retime
-        hold = f",tpad=stop_mode=clone:stop_duration={_num(clip.hold)}" if clip.hold else ""
-        g.chain(f"[{idx}:v]{retime}fps={fps},scale={size},setsar=1{hold}[mv{k}]")
+        dark = f",fade=t=out:st={_num(shown - clip.fade_out)}:d={_num(clip.fade_out)}" if clip.fade_out else ""
+        g.chain(f"[{idx}:v]{retime}fps={fps},scale={size},setsar=1{dark}[mv{k}]")
         if mi.has_audio:
             g.chain(f"[{idx}:a:0]aresample=48000,aformat=channel_layouts=stereo,asplit={len(segs)}"
                     + "".join(f"[as{k}_{j}]" for j in range(len(segs))))
@@ -292,12 +319,14 @@ def build_args(
             audio = ("".join(f"[ap{k}_{j}]" for j in range(len(segs)))
                      + f"concat=n={len(segs)}:v=0:a=1" if len(segs) > 1 else f"[ap{k}_0]anull")
         else:
-            audio = f"[{silence(shown + clip.hold)}:a]anull"
+            audio = f"[{silence(shown)}:a]anull"
         fades = []
-        if clip.trimmed:  # tiny fades so the cuts don't click
-            fades += [f"afade=t=in:d={CUT_FADE}", f"afade=t=out:st={_num(max(0.0, shown - CUT_FADE))}:d={CUT_FADE}"]
-        if clip.hold and mi.has_audio:  # the frozen frame is silent; the music carries it
-            fades.append(f"apad=pad_dur={_num(clip.hold)}")
+        mute = _fast_fades(segs) if mi.has_audio else ""
+        if mute:
+            fades.append(f"volume='{mute}':eval=frame")
+        if clip.trimmed:  # tiny fades so the cuts don't click; an eased end fades out with the slowdown
+            out_fade = min(shown, EASE_FADE) if clip.ease_out else clip.fade_out or CUT_FADE
+            fades += [f"afade=t=in:d={CUT_FADE}", f"afade=t=out:st={_num(max(0.0, shown - out_fade))}:d={_num(out_fade)}"]
         g.chain(audio + "".join("," + f for f in fades) + f"[ma{k}]")
         pieces.append(f"[mv{k}][ma{k}]")
     g.chain(f"{''.join(pieces)}concat=n={len(pieces)}:v=1:a=1[v0][amain]")

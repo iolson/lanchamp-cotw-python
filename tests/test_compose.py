@@ -1,3 +1,4 @@
+import re
 from fractions import Fraction
 from pathlib import Path
 
@@ -49,11 +50,18 @@ def test_punch_waits_for_a_clutch_that_starts_mid_clip():
     assert "setpts=PTS+28.35/TB[st2]" in g  # pulled back so the whole punch plays before the clip ends
 
 
-def test_held_clip_freezes_its_last_frame_with_silence():
-    tl = Timeline([ClipPlan(1, 0.0, 10.8, "a", "3K", "c", None, src_len=10.0, hold=0.8, trimmed=True)], 10.8)
+def test_eased_clip_fades_its_sound_out_as_it_slows():
+    tl = Timeline([ClipPlan(1, 0.0, 10.5, "a", "3K", "c", None, src_len=10.0, ease_out=0.6, trimmed=True)], 10.5)
     g = _graph(build_args(MAIN, tl, _assets(lower_thirds={}, punches={}), Options(), Path("o.mp4")))
-    assert "setsar=1,tpad=stop_mode=clone:stop_duration=0.8[mv0]" in g
-    assert "apad=pad_dur=0.8[ma0]" in g
+    assert "setpts='st(0" in g and "tpad" not in g  # retimed into slow motion, no frozen frame
+    assert re.search(r"afade=t=out:st=[\d.]+:d=0.8\[ma0\]", g)
+
+
+def test_victory_clip_fades_to_black():
+    tl = Timeline([ClipPlan(1, 0.0, 10.0, "a", "3K", "c", None, src_len=10.0, fade_out=0.6, trimmed=True)], 10.0)
+    g = _graph(build_args(MAIN, tl, _assets(lower_thirds={}, punches={}), Options(), Path("o.mp4")))
+    assert "setsar=1,fade=t=out:st=9.4:d=0.6[mv0]" in g
+    assert "afade=t=out:st=9.4:d=0.6[ma0]" in g
 
 
 def test_overlay_end_card_has_no_extra_segment():
@@ -233,8 +241,22 @@ def test_retime_expression_maps_source_time_through_each_piece():
 
 def test_fast_forward_audio_chains_atempo_up_to_2x():
     from cotw.compose import _fast_audio
-    assert _fast_audio(4.0) == ",atempo=2,atempo=2,volume=0.6"
-    assert _fast_audio(1.5) == ",atempo=1.5,volume=0.6"
+    assert _fast_audio(4.0) == ",atempo=2,atempo=2"
+    assert _fast_audio(1.5) == ",atempo=1.5"
+
+
+def test_fast_forward_fades_the_game_sound_out_and_back_in():
+    from cotw.compose import _fast_fades
+    # on screen: 2 s normal, ramp up 2-3 s, 4x from 3-5 s, ramp down 5-6 s, normal after
+    segs = [(0.0, 2.0, 1.0), (2.0, 2.0, 2.0), (4.0, 8.0, 4.0), (12.0, 2.0, 2.0), (14.0, 1.0, 1.0)]
+    expr = _fast_fades(segs)
+    assert expr == "clip(max((3-t)/1,(t-5)/1),0,1)"  # down to silence at 3 s, silent to 5 s, back at 6 s
+    gain = lambda t: min(1, max(0, max((3 - t) / 1, (t - 5) / 1)))
+    assert gain(1.0) == 1 and gain(2.5) == 0.5 and gain(4.0) == 0 and gain(5.5) == 0.5 and gain(6.5) == 1
+    assert _fast_fades([(0.0, 5.0, 1.0)]) == ""
+    tl = Timeline([ClipPlan(1, 0.0, 6.0, "a", "3K", "c", None, src_len=15.0, fast=((2.0, 14.0),), fast_speed=4.0)], 6.0)
+    g = _graph(build_args(MAIN, tl, _assets(lower_thirds={}, punches={}), Options(), Path("o.mp4")))
+    assert "volume='clip(max((" in g and ":eval=frame" in g
 
 
 def test_jump_cuts_drop_frames_and_fade_the_audio_at_the_cut():
